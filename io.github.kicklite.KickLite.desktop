@@ -1,0 +1,12 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Name=Kick Lite
+Comment=Hafif Kick.com canlı yayın ve VOD oynatıcısı
+Exec=kick-lite %U
+Icon=io.github.kicklite.KickLite
+Terminal=false
+Type=Application
+Categories=AudioVideo;Video;Player;
+MimeType=x-scheme-handler/kick;
+Keywords=Kick;stream;video;VOD;
+StartupNotify=true
