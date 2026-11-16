@@ -514,6 +514,11 @@ impl App {
                 let cfg = a.cfg.borrow().clone();
                 let _ = config::save(&cfg);
                 a.player.shutdown();
+                // Timeout'lar App'i Rc ile tuttuğundan ana döngüyü canlı
+                // bırakabilir. Son pencere kapandığında uygulamayı da bitir.
+                if let Some(app) = a.window.application() {
+                    app.quit();
+                }
                 glib::Propagation::Proceed
             });
         }
