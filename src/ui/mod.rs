@@ -257,8 +257,6 @@ impl App {
         toast_overlay.set_child(Some(&toolbar));
         window.set_content(Some(&toast_overlay));
 
-        setup_actions(gtk_app, &window);
-
         let language = if cfg.language == "auto" || cfg.language.is_empty() {
             system_language()
         } else {
@@ -309,6 +307,7 @@ impl App {
         }
 
         app.clone().wire();
+        setup_actions(gtk_app, &app);
         install_language_actions(gtk_app, &app);
         install_silence_settings_action(gtk_app, &app);
         {
@@ -1503,31 +1502,56 @@ impl App {
     }
 }
 
-fn setup_actions(gtk_app: &adw::Application, window: &adw::ApplicationWindow) {
+fn setup_actions(gtk_app: &adw::Application, app: &Rc<App>) {
+    const PROJECT_URL: &str = "https://github.com/mucahit-sahin/kick-linux";
+    const AUTHOR_URL: &str = "https://github.com/mucahit-sahin";
+
     let about = gio::SimpleAction::new("about", None);
-    let win = window.clone();
+    let a = app.clone();
     about.connect_activate(move |_, _| {
         let dialog = adw::AboutDialog::builder()
             .application_name("Kick Lite")
             .application_icon("io.github.kicklite.KickLite")
-            .developer_name("Kick Lite")
+            .developer_name("Mucahit Sahin")
             .version(env!("CARGO_PKG_VERSION"))
-            .comments(
-                "A lightweight Kick.com livestream and replay player.\n\
-                 Uses Kick's public, unofficial API.",
-            )
-            .website("https://kick.com")
+            .comments(a.text(
+                concat!(
+                    "Kick Lite, Kick.com canlı yayınlarını ve yayın tekrarlarını hafif bir ",
+                    "masaüstü oynatıcıyla izlemenizi sağlar. GTK4, libadwaita ve libmpv ",
+                    "kullanır; web tarayıcısı gömmez.",
+                    "\n\nProje: https://github.com/mucahit-sahin/kick-linux",
+                    "\nYazar: Mucahit Sahin — https://github.com/mucahit-sahin",
+                    "\n\nKick'in herkese açık, resmî olmayan API'sini kullanır.",
+                ),
+                concat!(
+                    "Kick Lite is a lightweight desktop player for watching Kick.com ",
+                    "livestreams and replays. It uses GTK4, libadwaita and libmpv, ",
+                    "and does not embed a web browser.",
+                    "\n\nProject: https://github.com/mucahit-sahin/kick-linux",
+                    "\nAuthor: Mucahit Sahin — https://github.com/mucahit-sahin",
+                    "\n\nUses Kick's public, unofficial API.",
+                ),
+            ))
+            .website(PROJECT_URL)
             .license_type(gtk::License::MitX11)
             .build();
-        dialog.present(Some(&win));
+        dialog.add_link("Kick.com", "https://kick.com");
+        dialog.add_link(
+            &a.text("Sorun bildir", "Report an issue"),
+            "https://github.com/mucahit-sahin/kick-linux/issues",
+        );
+        dialog.add_link(
+            &a.text("Yazarın GitHub profili", "Author's GitHub profile"),
+            AUTHOR_URL,
+        );
+        dialog.present(Some(&a.window));
     });
     gtk_app.add_action(&about);
 
     let quit = gio::SimpleAction::new("quit", None);
-    let app = gtk_app.clone();
-    quit.connect_activate(move |_, _| app.quit());
+    let gtk_app_for_quit = gtk_app.clone();
+    quit.connect_activate(move |_, _| gtk_app_for_quit.quit());
     gtk_app.add_action(&quit);
-    let _ = gtk_app;
 }
 
 fn install_silence_settings_action(gtk_app: &adw::Application, app: &Rc<App>) {
