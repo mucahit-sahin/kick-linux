@@ -128,6 +128,10 @@ impl App {
 
         let menu_model = gio::Menu::new();
         menu_model.append(Some("About / Hakkında"), Some("app.about"));
+        menu_model.append(
+            Some("Silence settings / Sessizlik ayarları"),
+            Some("app.silence-settings"),
+        );
         let language_menu = gio::Menu::new();
         language_menu.append(Some("Sistem dili / System"), Some("app.language-auto"));
         language_menu.append(Some("Türkçe"), Some("app.language-tr"));
@@ -306,6 +310,7 @@ impl App {
 
         app.clone().wire();
         install_language_actions(gtk_app, &app);
+        install_silence_settings_action(gtk_app, &app);
         {
             let a = app.clone();
             sidebar_toggle.connect_clicked(move |_| {
@@ -334,6 +339,97 @@ impl App {
         let cfg = self.cfg.borrow().clone();
         let _ = config::save(&cfg);
         self.apply_language();
+    }
+
+    /// Sessizlik algılama eşiklerini düzenleme penceresi.
+    fn show_silence_settings(self: &Rc<Self>) {
+        let cfg = self.cfg.borrow().clone();
+        let dialog = adw::PreferencesDialog::builder()
+            .title(self.text("Sessizlik algılama", "Silence detection"))
+            .build();
+        let page = adw::PreferencesPage::new();
+        let group = adw::PreferencesGroup::builder()
+            .title(self.text("Yayın tekrarları", "Replays"))
+            .description(self.text(
+                "Bu eşikler yalnızca VOD'larda sessiz kısımları atlamak için kullanılır.",
+                "These thresholds are only used for skipping silence in replays.",
+            ))
+            .build();
+
+        let noise = adw::SpinRow::builder()
+            .title(self.text("Ses eşiği (dB)", "Noise threshold (dB)"))
+            .subtitle(self.text(
+                "Altındaki ses düzeyleri sessiz sayılır",
+                "Audio levels below this are treated as silence",
+            ))
+            .build();
+        noise.set_range(-80.0, 0.0);
+        noise.set_digits(0);
+        noise.set_value(cfg.silence_noise_db as f64);
+
+        let duration = adw::SpinRow::builder()
+            .title(self.text("En kısa sessizlik (sn)", "Minimum silence (s)"))
+            .subtitle(self.text(
+                "Bu süreden kısa boşluklar atlanmaz",
+                "Gaps shorter than this are ignored",
+            ))
+            .build();
+        duration.set_range(0.1, 10.0);
+        duration.set_digits(1);
+        duration.set_value(cfg.silence_duration);
+
+        // Değer değişince ayarı kaydet ve filtreyi yeniden uygula. Spin düğmesi
+        // tutulduğunda çok sık filtre değişmemesi için kısa bir gecikme kullan.
+        let pending: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+        for row in [noise.clone(), duration.clone()] {
+            let a = self.clone();
+            let pending = pending.clone();
+            let noise = noise.clone();
+            let duration = duration.clone();
+            row.connect_value_notify(move |_| {
+                {
+                    let mut cfg = a.cfg.borrow_mut();
+                    cfg.silence_noise_db = noise.value().round() as i32;
+                    cfg.silence_duration = duration.value();
+                }
+                if let Some(id) = pending.borrow_mut().take() {
+                    id.remove();
+                }
+                let a = a.clone();
+                let id = glib::timeout_add_local(std::time::Duration::from_millis(350), move || {
+                    let cfg = a.cfg.borrow().clone();
+                    if let Err(err) =
+                        a.player.apply_silence_filter(cfg.silence_noise_db, cfg.silence_duration)
+                    {
+                        eprintln!("sessizlik filtresi uygulanamadı: {err}");
+                    }
+                    let _ = config::save(&cfg);
+                    glib::ControlFlow::Break
+                });
+                pending.replace(Some(id));
+            });
+        }
+
+        let reset = adw::ActionRow::builder()
+            .title(self.text("Varsayılan değerler", "Default values"))
+            .build();
+        let reset_btn = gtk::Button::with_label(self.text("Sıfırla", "Reset"));
+        reset_btn.set_valign(gtk::Align::Center);
+        let defaults = config::Config::default();
+        let noise_reset = noise.clone();
+        let duration_reset = duration.clone();
+        reset_btn.connect_clicked(move |_| {
+            noise_reset.set_value(defaults.silence_noise_db as f64);
+            duration_reset.set_value(defaults.silence_duration);
+        });
+        reset.add_suffix(&reset_btn);
+
+        group.add(&noise);
+        group.add(&duration);
+        group.add(&reset);
+        page.add(&group);
+        dialog.add(&page);
+        dialog.present(Some(&self.window));
     }
 
     fn apply_language(self: &Rc<Self>) {
@@ -472,6 +568,7 @@ impl App {
                         .map(|m| m.kind == MediaKind::Vod)
                         .unwrap_or(false);
                     if is_vod {
+                        a.player.clear_silence();
                         a.player
                             .seek_relative(if keyval == Key::Left { -10.0 } else { 10.0 });
                         a.poke_controls();
@@ -943,6 +1040,7 @@ impl App {
         );
         let catch_up = media.kind == MediaKind::Live;
         self.live_catch_up.set(catch_up);
+        self.player.set_silence_allowed(media.kind == MediaKind::Vod);
         self.player.set_speed(if catch_up { 2.0 } else { 1.0 });
         self.player_page.speed_btn.set_label(if catch_up { "2x" } else { "1x" });
 
@@ -1010,6 +1108,7 @@ impl App {
 
     pub fn stop_player(&self) {
         self.save_current_position();
+        self.player.set_silence_allowed(false);
         self.player.stop();
         self.resume_pending.set(None);
         self.live_catch_up.set(false);
@@ -1236,6 +1335,11 @@ impl App {
     // ---- oynatıcı döngüsü ----
 
     fn tick(self: &Rc<Self>) {
+        // mpv olaylarını her durumda boşalt (mini oynatıcı aktifken de
+        // silencedetect raporları gelmeye devam eder). Sessiz atlama hız
+        // değişimi olarak uygulandığı için burada tetiklenir.
+        self.player.poll_events();
+
         if self.stack.visible_child_name().as_deref() != Some("player") {
             return;
         }
@@ -1269,6 +1373,7 @@ impl App {
             }
             Phase::Playing if self.player.is_idle() => {
                 self.phase.set(Phase::Ended);
+                self.player.clear_silence();
                 self.player_page.spinner.stop();
                 self.player_page.show_status(if live {
                     if self.is_english() { "Live stream ended" } else { "Canlı yayın sona erdi" }
@@ -1313,6 +1418,7 @@ impl App {
                 .unwrap_or(u128::MAX);
             if waited >= 350 {
                 self.player_page.pending_seek.set(None);
+                self.player.clear_silence();
                 self.player.seek(target, true);
                 self.player_page.seek.set_value(target);
                 self.player_page.pos.set_text(&fmt::duration(target));
@@ -1398,6 +1504,13 @@ fn setup_actions(gtk_app: &adw::Application, window: &adw::ApplicationWindow) {
     quit.connect_activate(move |_, _| app.quit());
     gtk_app.add_action(&quit);
     let _ = gtk_app;
+}
+
+fn install_silence_settings_action(gtk_app: &adw::Application, app: &Rc<App>) {
+    let action = gio::SimpleAction::new("silence-settings", None);
+    let a = app.clone();
+    action.connect_activate(move |_, _| a.show_silence_settings());
+    gtk_app.add_action(&action);
 }
 
 fn install_language_actions(gtk_app: &adw::Application, app: &Rc<App>) {

@@ -69,7 +69,7 @@ fn main() -> glib::ExitCode {
             setlocale(LC_NUMERIC, b"C\0".as_ptr() as *const c_char);
         }
         let cfg = config::load();
-        match mpv::Player::new() {
+        match mpv::Player::new(cfg.silence_noise_db, cfg.silence_duration) {
             Ok(player) => {
                 let window = ui::App::new(app, player, cfg);
                 if let Some(target) = pending.borrow_mut().take() {
@@ -256,6 +256,10 @@ const CSS: &str = r#"
 .video-bottombar button { color: #ffffff; }
 .video-topbar button:hover,
 .video-bottombar button:hover { background-color: rgba(255, 255, 255, 0.18); }
+.video-toggle:checked {
+    background-color: rgba(255, 255, 255, 0.26);
+    box-shadow: inset 0 -2px 0 #ffffff;
+}
 
 .video-title {
     font-weight: bold;

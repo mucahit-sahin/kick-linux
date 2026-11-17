@@ -10,7 +10,7 @@ use anyhow::{bail, Result};
 use gtk::glib;
 use gtk::prelude::*;
 use std::cell::{Cell, RefCell};
-use std::ffi::{c_char, c_double, c_int, c_void, CString};
+use std::ffi::{c_char, c_double, c_int, c_void, CStr, CString};
 use std::ptr;
 
 #[repr(C)]
@@ -31,7 +31,28 @@ pub struct mpv_event {
     pub data: *mut c_void,
 }
 
+/// `MPV_EVENT_LOG_MESSAGE` olayının veri yapısı (client.h).
+#[repr(C)]
+pub struct mpv_event_log_message {
+    pub prefix: *const c_char,
+    pub level: *const c_char,
+    pub text: *const c_char,
+    pub log_level: c_int,
+}
 
+// mpv_event_id (yalnızca kullandığımız değerler)
+const MPV_EVENT_NONE: c_int = 0;
+const MPV_EVENT_SHUTDOWN: c_int = 1;
+const MPV_EVENT_LOG_MESSAGE: c_int = 2;
+
+/// Sessizlik sırasında kullanılacak oynatma hızı. Normal hızla 4 saniyelik
+/// bir boşluk ~0.4 saniyeye iner; bu, "atlama" etkisini verir.
+const SKIP_SPEED: f64 = 10.0;
+/// Bir `silence_start` raporunun güncel oynatmayla ilgili sayılabilmesi için
+/// izin verilen konum farkı (saniye).
+const SILENCE_POS_TOLERANCE: f64 = 2.5;
+/// Bir çağrıda işlenecek azami olay sayısı (kuyruğu tıkamamak için).
+const MAX_EVENTS_PER_POLL: usize = 256;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -92,6 +113,8 @@ extern "C" {
         data: *mut c_void,
     ) -> c_int;
     fn mpv_command(ctx: *mut mpv_handle, args: *const *const c_char) -> c_int;
+    fn mpv_wait_event(ctx: *mut mpv_handle, timeout: c_double) -> *mut mpv_event;
+    fn mpv_request_log_messages(ctx: *mut mpv_handle, min_level: *const c_char) -> c_int;
 
     fn mpv_render_context_create(
         res: *mut *mut mpv_render_context,
@@ -134,10 +157,18 @@ pub struct Player {
     /// Güncelleme geri çağrısının kullandığı WeakRef'in sahibi.
     keep: RefCell<Option<Box<AreaWeak>>>,
     alive: Cell<bool>,
+    /// Kullanıcının açıp kapattığı tercih.
+    skip_silence: Cell<bool>,
+    /// Geçerli ortamda atlamaya izin var mı (yalnızca VOD'larda).
+    silence_allowed: Cell<bool>,
+    /// Şu anda bir sessizliğin içinde hızlandırılmış oynatma yapılıyor mu?
+    silence_active: Cell<bool>,
+    /// Sessizliktan önceki oynatma hızı (sonra geri yüklenir).
+    saved_speed: Cell<f64>,
 }
 
 impl Player {
-    pub fn new() -> Result<Self> {
+    pub fn new(noise_db: i32, duration: f64) -> Result<Self> {
         unsafe {
             let handle = mpv_create();
             if handle.is_null() {
@@ -148,12 +179,22 @@ impl Player {
                 render: Cell::new(ptr::null_mut()),
                 keep: RefCell::new(None),
                 alive: Cell::new(true),
+                skip_silence: Cell::new(false),
+                silence_allowed: Cell::new(false),
+                silence_active: Cell::new(false),
+                saved_speed: Cell::new(1.0),
             };
-            for (name, value) in options() {
+            for (name, value) in options(noise_db, duration) {
                 if let Err(err) = player.set_option(name, &value) {
                     eprintln!("mpv: {err}");
                 }
             }
+            // `silencedetect` ileti düzeyi "v" olduğundan istemciye gelen
+            // iletiler için alt sınırı düşürüyoruz. `msg-level=ffmpeg=v`
+            // yalnızca bu filtreyle ilgili iletileri üretir; diğer modüller
+            // sessiz kalır.
+            let level = CString::new("terminal-default").unwrap();
+            mpv_request_log_messages(handle, level.as_ptr());
             let rc = mpv_initialize(handle);
             if rc < 0 {
                 mpv_terminate_destroy(handle);
@@ -284,6 +325,7 @@ impl Player {
 
     pub fn load(&self, url: &str, start: Option<f64>) -> Result<()> {
         self.set_paused(false);
+        self.clear_silence();
         // Başlangıç seek'i dosya yüklenip süre bilgisi hazır olduktan sonra
         // uygulanır. Bazı HLS VOD'larda loadfile seçenekleriyle verilen start
         // parametresi yayının hata vermesine neden olabiliyor.
@@ -292,6 +334,7 @@ impl Player {
     }
 
     pub fn stop(&self) {
+        self.clear_silence();
         let _ = self.command(&["stop"]);
     }
 
@@ -336,15 +379,13 @@ impl Player {
     }
 
     pub fn set_speed(&self, speed: f64) {
-        let name = CString::new("speed").unwrap();
-        let mut value = speed.clamp(0.25, 8.0);
-        unsafe {
-            mpv_set_property(
-                self.handle,
-                name.as_ptr(),
-                MPV_FORMAT_DOUBLE,
-                &mut value as *mut _ as *mut c_void,
-            );
+        let value = speed.clamp(0.25, 8.0);
+        if self.silence_active.get() {
+            // Kullanıcı sessizlik sırasında hız değiştirirse, sessizlik
+            // bittikten sonra bu yeni hıza dönüyoruz.
+            self.saved_speed.set(value);
+        } else {
+            self.set_speed_raw(value);
         }
     }
 
@@ -400,6 +441,116 @@ impl Player {
     pub fn seek_relative(&self, seconds: f64) {
         let delta = format!("{seconds:.3}");
         let _ = self.command(&["seek", &delta, "relative+exact"]);
+    }
+
+    // ---- sessiz kısımları atlama ----
+
+    /// Özelliği açar/kapatır. Kapatılınca hızlandırılmış oynatma varsa
+    /// önceki hıza dönülür.
+    pub fn set_skip_silence(&self, enabled: bool) {
+        self.skip_silence.set(enabled);
+        if !enabled {
+            self.end_silence_skip();
+        }
+    }
+
+    /// Sessizlik algılama eşiklerini değiştirir. `af set` komutu ses zincirini
+    /// yeniden kurar; oynatma devam eder.
+    pub fn apply_silence_filter(&self, noise_db: i32, duration: f64) -> Result<()> {
+        self.end_silence_skip();
+        self.command(&["af", "set", &silence_filter(noise_db, duration)])
+    }
+
+    /// Canlı yayınlarda atlama yapılmasın; yalnızca VOD'larda izin verilir.
+    pub fn set_silence_allowed(&self, allowed: bool) {
+        self.silence_allowed.set(allowed);
+        if !allowed {
+            self.end_silence_skip();
+        }
+    }
+
+    /// Yeni bir dosya yüklenirken/oyunatma dururken hızı eski hâline döndür.
+    pub fn clear_silence(&self) {
+        self.end_silence_skip();
+    }
+
+    fn end_silence_skip(&self) {
+        if self.silence_active.replace(false) {
+            self.set_speed_raw(self.saved_speed.get());
+        }
+    }
+
+    /// mpv olay kuyruğunu boşaltır ve `silencedetect` raporlarını işler.
+    /// Ana döngüden (GTK iş parçacığından) çağrılmalıdır; olay verisi bir
+    /// sonraki `mpv_wait_event()` çağrısına kadar geçerlidir.
+    pub fn poll_events(&self) {
+        if !self.alive.get() {
+            return;
+        }
+        for _ in 0..MAX_EVENTS_PER_POLL {
+            let event = unsafe { mpv_wait_event(self.handle, 0.0) };
+            if event.is_null() {
+                return;
+            }
+            let event = unsafe { &*event };
+            match event.event_id {
+                MPV_EVENT_NONE | MPV_EVENT_SHUTDOWN => return,
+                MPV_EVENT_LOG_MESSAGE if !event.data.is_null() => {
+                    let msg = unsafe { &*(event.data as *const mpv_event_log_message) };
+                    if msg.text.is_null() {
+                        continue;
+                    }
+                    let text = unsafe { CStr::from_ptr(msg.text) }.to_string_lossy();
+                    self.handle_silence_message(&text);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// `silencedetect` bir sessizliğin başladığını/bittiğini bildirdiğinde
+    /// oynatma hızını geçici olarak artırır (ve sonra geri yükler).
+    ///
+    /// `silence_end` raporu oynatma zaten sessizliğin sonuna gelmişken
+    /// geldiğinden, konuma atlamak yerine sessizlik boyunca hızlandırmak
+    /// daha güvenilirdir: algılama oynatmayla eş zamanlı çalışır.
+    fn handle_silence_message(&self, text: &str) {
+        if !self.skip_silence.get() || !self.silence_allowed.get() {
+            return;
+        }
+        if text.contains("silence_start:") {
+            if self.silence_active.get() {
+                return; // yinelenen rapor
+            }
+            let Some(start) = number_after(text, "silence_start:") else {
+                return;
+            };
+            // Eski bir raporsa (ör. seek sonrası) tepki verme.
+            if let Some(pos) = self.position() {
+                if (pos - start).abs() > SILENCE_POS_TOLERANCE {
+                    return;
+                }
+            }
+            self.saved_speed.set(self.get_f64("speed").unwrap_or(1.0));
+            self.silence_active.set(true);
+            self.set_speed_raw(SKIP_SPEED);
+        } else if text.contains("silence_end:") && self.silence_active.get() {
+            self.end_silence_skip();
+        }
+    }
+
+    /// Sınırsız hız ayarı (sessiz atlama için `speed` aralığını aşabilir).
+    fn set_speed_raw(&self, speed: f64) {
+        let name = CString::new("speed").unwrap();
+        let mut value = speed.clamp(0.1, 60.0);
+        unsafe {
+            mpv_set_property(
+                self.handle,
+                name.as_ptr(),
+                MPV_FORMAT_DOUBLE,
+                &mut value as *mut _ as *mut c_void,
+            );
+        }
     }
 
     fn get_f64(&self, name: &str) -> Option<f64> {
@@ -471,7 +622,22 @@ impl Drop for Player {
     }
 }
 
-fn options() -> Vec<(&'static str, String)> {
+/// Metinde `anahtar`dan sonraki ilk sayıyı okur (mpv/ffmpeg günlük satırları için).
+fn number_after(text: &str, key: &str) -> Option<f64> {
+    let rest = &text.get(text.find(key)? + key.len()..)?;
+    let rest = rest.trim_start();
+    let len = rest
+        .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+        .unwrap_or(rest.len());
+    rest[..len].parse().ok()
+}
+
+/// `silencedetect` filtre zincirini kullanıcı ayarlarından üretir.
+fn silence_filter(noise_db: i32, duration: f64) -> String {
+    format!("lavfi=[silencedetect=noise={noise_db}dB:d={duration:.2}]")
+}
+
+fn options(noise_db: i32, duration: f64) -> Vec<(&'static str, String)> {
     vec![
         ("terminal", "no".into()),
         ("config", "no".into()),
@@ -494,6 +660,11 @@ fn options() -> Vec<(&'static str, String)> {
         ("audio-file-auto", "no".into()),
         ("audio-client-name", "Kick Lite".into()),
         ("volume-max", "100".into()),
+        // Sessizlik algılama her zaman etkin; atlama davranışı `skip_silence`
+        // bayrağıyla açılıp kapanır. Böylece açılışta filtre yeniden
+        // başlatılmaz ve konum/zaman damgaları kaymaz.
+        ("af", silence_filter(noise_db, duration)),
+        ("msg-level", "ffmpeg=v".into()),
     ]
 }
 

@@ -10,6 +10,8 @@ libadwaita ve libmpv kullanır.
 - Canlı yayın ve VOD oynatma
 - HLS kalite seçimi
 - Oynat/duraklat, arama, ses ve tam ekran kontrolleri
+- Yayın tekrarlarında (VOD) sessiz kısımları atlama (açılıp kapatılabilir)
+- Sessizlik eşiği (dB) ve en kısa sessizlik süresi menüden ayarlanabilir
 - Takip edilen kanalları `~/.config/kick-lite/config.json` içinde saklama
 - Wayland ve X11 desteği
 - Görsel küçük resimleri ve sohbeti yüklemez; bellek kullanımını düşük tutar

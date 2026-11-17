@@ -1,6 +1,7 @@
 //! Video sayfası: GLArea üzerinde mpv çizimi ve üzerine binen kontroller.
 
 use crate::api;
+use crate::config;
 use crate::fmt;
 use crate::ui::{clear_container, App, Media, MediaKind};
 use gtk::glib;
@@ -33,6 +34,7 @@ pub struct PlayerPage {
     pub speed_btn: gtk::MenuButton,
     pub speed_popover: gtk::Popover,
     pub speed_box: gtk::Box,
+    pub skip_silence: gtk::ToggleButton,
     pub fs: gtk::Button,
     pub mini_close: gtk::Button,
     pub mini_click_area: gtk::DrawingArea,
@@ -181,6 +183,12 @@ impl PlayerPage {
         speed_btn.set_has_frame(false);
         speed_btn.add_css_class("video-button");
 
+        let skip_silence = gtk::ToggleButton::with_label("Sessiz atla");
+        skip_silence.set_has_frame(false);
+        skip_silence.add_css_class("video-button");
+        skip_silence.add_css_class("video-toggle");
+        skip_silence.set_tooltip_text(Some("Yayın tekrarlarında sessiz kısımları atla"));
+
         let fs = gtk::Button::from_icon_name("view-fullscreen-symbolic");
         fs.set_tooltip_text(Some("Tam ekran (F)"));
         fs.set_has_frame(false);
@@ -199,6 +207,7 @@ impl PlayerPage {
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         actions.append(&vol_btn);
         actions.append(&volume);
+        actions.append(&skip_silence);
         actions.append(&speed_btn);
         actions.append(&quality_btn);
         actions.append(&fs);
@@ -280,6 +289,7 @@ impl PlayerPage {
             speed_btn,
             speed_popover,
             speed_box,
+            skip_silence,
             fs,
             mini_close,
             mini_click_area,
@@ -479,6 +489,21 @@ impl PlayerPage {
                 });
         }
 
+        // Sessiz kısımları atlama: açık/kapalı durumu ayarlarda saklanır.
+        {
+            let initial = app.cfg.borrow().skip_silence;
+            app.player.set_skip_silence(initial);
+            self.skip_silence.set_active(initial);
+            let a = app.clone();
+            self.skip_silence.connect_toggled(move |button| {
+                let enabled = button.is_active();
+                a.player.set_skip_silence(enabled);
+                a.cfg.borrow_mut().skip_silence = enabled;
+                let cfg = a.cfg.borrow().clone();
+                let _ = config::save(&cfg);
+            });
+        }
+
         // Başlangıç ses ayarı
         {
             let cfg = app.cfg.borrow().clone();
@@ -510,6 +535,8 @@ impl PlayerPage {
         self.volume.set_tooltip_text(Some(if english { "Volume" } else { "Ses düzeyi" }));
         self.quality_btn.set_tooltip_text(Some(if english { "Stream quality" } else { "Yayın kalitesi" }));
         self.speed_btn.set_tooltip_text(Some(if english { "Playback speed" } else { "Oynatma hızı" }));
+        self.skip_silence.set_label(if english { "Skip silence" } else { "Sessiz atla" });
+        self.skip_silence.set_tooltip_text(Some(if english { "Skip silent parts in replays" } else { "Yayın tekrarlarında sessiz kısımları atla" }));
         self.fs.set_tooltip_text(Some(if english { "Fullscreen (F)" } else { "Tam ekran (F)" }));
         self.mini_close.set_tooltip_text(Some(if english { "Close stream / video" } else { "Yayını / videoyu kapat" }));
         self.quality_btn.set_label(if english { "Quality" } else { "Kalite" });
@@ -536,6 +563,8 @@ impl PlayerPage {
         self.seek_box.set_visible(!live);
         self.live_controls_spacer.set_visible(live);
         self.seek.set_sensitive(!live);
+        // Sessiz atlama yalnızca yayın tekrarlarında (VOD) anlamlıdır.
+        self.skip_silence.set_visible(!live);
         self.pos.set_text("0:00");
         self.dur
             .set_text(&media.duration.map(fmt::duration).unwrap_or_default());
