@@ -102,6 +102,9 @@ pub struct App {
     resume_pending: Cell<Option<f64>>,
     live_catch_up: Cell<bool>,
     pub active_downloads: RefCell<HashMap<String, ActiveDownload>>,
+    download_indicator: gtk::Button,
+    download_indicator_label: gtk::Label,
+    download_indicator_spinner: gtk::Spinner,
 }
 
 impl App {
@@ -159,8 +162,24 @@ impl App {
         menu_btn.set_menu_model(Some(&menu_model));
         menu_btn.set_has_frame(false);
 
+        // Shown only while a replay is being downloaded. Clicking it returns
+        // to the home page, where the Downloads section shows the progress.
+        let download_indicator = gtk::Button::new();
+        download_indicator.add_css_class("flat");
+        download_indicator.set_visible(false);
+        let indicator_content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        indicator_content.set_margin_start(8);
+        indicator_content.set_margin_end(8);
+        let download_indicator_spinner = gtk::Spinner::new();
+        let download_indicator_label = gtk::Label::new(None);
+        download_indicator_label.add_css_class("dim-label");
+        indicator_content.append(&download_indicator_spinner);
+        indicator_content.append(&download_indicator_label);
+        download_indicator.set_child(Some(&indicator_content));
+
         header.pack_end(&menu_btn);
         header.pack_end(&refresh_btn);
+        header.pack_end(&download_indicator);
         header.pack_start(&home_btn);
         header.pack_end(&search);
 
@@ -314,6 +333,9 @@ impl App {
             resume_pending: Cell::new(None),
             live_catch_up: Cell::new(false),
             active_downloads: RefCell::new(HashMap::new()),
+            download_indicator: download_indicator.clone(),
+            download_indicator_label,
+            download_indicator_spinner,
         });
         download::cleanup(&app.cfg.borrow().downloads);
         app.apply_language();
@@ -321,6 +343,10 @@ impl App {
         {
             let a = app.clone();
             home_btn.connect_clicked(move |_| a.go_home());
+        }
+        {
+            let a = app.clone();
+            download_indicator.connect_clicked(move |_| a.go_home());
         }
 
         app.clone().wire();
@@ -482,6 +508,12 @@ impl App {
         self.refresh_btn.set_tooltip_text(Some(if en { "Refresh followed channels" } else { "Takip edilenleri yenile" }));
         self.add_btn.set_tooltip_text(Some(if en { "Add channel" } else { "Kanal ekle" }));
         self.search.set_tooltip_text(Some(if en { "Enter a channel name or Kick link" } else { "Kanal adı veya Kick bağlantısı gir" }));
+        self.download_indicator.set_tooltip_text(Some(if en {
+            "Download in progress — click to view"
+        } else {
+            "İndirme devam ediyor — görüntülemek için tıkla"
+        }));
+        self.update_download_indicator();
         if let Some(header) = self.sidebar_title.parent().and_then(|p| p.parent()) {
             let _ = header;
         }
@@ -1121,6 +1153,7 @@ impl App {
                 cancel: handle.cancel.clone(),
             },
         );
+        self.update_download_indicator();
         if self.stack.visible_child_name().as_deref() == Some("home") {
             home::render(self);
         }
@@ -1137,12 +1170,14 @@ impl App {
                             active.total = total;
                             active.bytes = bytes;
                         }
+                        a.update_download_indicator();
                         if a.stack.visible_child_name().as_deref() == Some("home") {
                             home::render(&a);
                         }
                     }
                     download::Event::Finished(result) => {
                         a.active_downloads.borrow_mut().remove(&finished_id);
+                        a.update_download_indicator();
                         match result {
                             Ok(outcome) => {
                                 let mut cfg = a.cfg.borrow_mut();
@@ -1176,6 +1211,42 @@ impl App {
             active
                 .cancel
                 .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Keeps the header-bar badge in sync with the running downloads.
+    fn update_download_indicator(&self) {
+        let active = self.active_downloads.borrow();
+        if active.is_empty() {
+            if self.download_indicator.is_visible() {
+                self.download_indicator_spinner.stop();
+                self.download_indicator.set_visible(false);
+            }
+            return;
+        }
+
+        let count = active.len();
+        let measured: Vec<&ActiveDownload> = active.values().filter(|item| item.total > 0).collect();
+        let percent = if measured.is_empty() {
+            None
+        } else {
+            let done: usize = measured.iter().map(|item| item.done).sum();
+            let total: usize = measured.iter().map(|item| item.total).sum();
+            Some((done as f64 / total as f64 * 100.0).round() as u64)
+        };
+        let text = match (count, percent) {
+            (1, Some(percent)) => format!("{} %{percent}", self.text("İndiriliyor", "Downloading")),
+            (1, None) => self.text("İndiriliyor…", "Downloading…").to_string(),
+            (count, Some(percent)) => format!(
+                "{count} {} · %{percent}",
+                self.text("indirme", "downloads")
+            ),
+            (count, None) => format!("{count} {}…", self.text("indirme", "downloads")),
+        };
+        self.download_indicator_label.set_text(&text);
+        if !self.download_indicator.is_visible() {
+            self.download_indicator_spinner.start();
+            self.download_indicator.set_visible(true);
         }
     }
 
