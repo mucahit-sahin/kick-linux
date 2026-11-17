@@ -19,8 +19,23 @@ extern "C" {
 
 /// LC_NUMERIC = 1 on glibc
 const LC_NUMERIC: i32 = 1;
+/// LC_MESSAGES = 5 on glibc
+const LC_MESSAGES: i32 = 5;
 
 const APP_ID: &str = "io.github.kicklite.KickLite";
+
+/// Keeps libadwaita/GTK's own strings (e.g. "Details", "Legal") in sync with
+/// the language selected in the app. "auto" restores the system locale.
+pub(crate) fn set_messages_locale(language: &str) {
+    let locale: &[u8] = match language {
+        "en" => b"C\0",
+        "tr" => b"tr_TR.UTF-8\0",
+        _ => b"\0",
+    };
+    unsafe {
+        setlocale(LC_MESSAGES, locale.as_ptr() as *const c_char);
+    }
+}
 
 fn main() -> glib::ExitCode {
     // mpv requires the numeric locale to be "C".

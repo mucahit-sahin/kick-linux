@@ -74,6 +74,7 @@ pub struct App {
     pub search: gtk::SearchEntry,
     pub refresh_btn: gtk::Button,
     pub add_btn: gtk::Button,
+    menu_btn: gtk::MenuButton,
     pub stack: gtk::Stack,
     pub home_box: gtk::Box,
     pub home_scroll: gtk::ScrolledWindow,
@@ -105,6 +106,45 @@ pub struct App {
     download_indicator: gtk::Button,
     download_indicator_label: gtk::Label,
     download_indicator_spinner: gtk::Spinner,
+}
+
+/// Builds the three-dot menu with labels in the selected UI language.
+fn build_menu(english: bool) -> gio::Menu {
+    let model = gio::Menu::new();
+    model.append(
+        Some(if english { "About" } else { "Hakkında" }),
+        Some("app.about"),
+    );
+    model.append(
+        Some(if english {
+            "Silence settings"
+        } else {
+            "Sessizlik ayarları"
+        }),
+        Some("app.silence-settings"),
+    );
+
+    let language_menu = gio::Menu::new();
+    language_menu.append(
+        Some(if english {
+            "System default"
+        } else {
+            "Sistem dili"
+        }),
+        Some("app.language-auto"),
+    );
+    language_menu.append(Some("Türkçe"), Some("app.language-tr"));
+    language_menu.append(Some("English"), Some("app.language-en"));
+    model.append_submenu(
+        Some(if english { "Language" } else { "Dil" }),
+        &language_menu,
+    );
+
+    model.append(
+        Some(if english { "Quit" } else { "Çıkış" }),
+        Some("app.quit"),
+    );
+    model
 }
 
 impl App {
@@ -144,22 +184,17 @@ impl App {
         home_btn.set_tooltip_text(Some("Go to home"));
         home_btn.set_has_frame(false);
 
-        let menu_model = gio::Menu::new();
-        menu_model.append(Some("About / Hakkında"), Some("app.about"));
-        menu_model.append(
-            Some("Silence settings / Sessizlik ayarları"),
-            Some("app.silence-settings"),
-        );
-        let language_menu = gio::Menu::new();
-        language_menu.append(Some("Sistem dili / System"), Some("app.language-auto"));
-        language_menu.append(Some("Türkçe"), Some("app.language-tr"));
-        language_menu.append(Some("English"), Some("app.language-en"));
-        menu_model.append_submenu(Some("Language / Dil"), &language_menu);
-        menu_model.append(Some("Quit / Çıkış"), Some("app.quit"));
+        let language = if cfg.language == "auto" || cfg.language.is_empty() {
+            system_language()
+        } else {
+            cfg.language.clone()
+        };
+        let en = language == "en";
+
         let menu_btn = gtk::MenuButton::new();
         menu_btn.set_icon_name("open-menu-symbolic");
-        menu_btn.set_tooltip_text(Some("Menu / Menü"));
-        menu_btn.set_menu_model(Some(&menu_model));
+        menu_btn.set_tooltip_text(Some(if en { "Menu" } else { "Menü" }));
+        menu_btn.set_menu_model(Some(&build_menu(en)));
         menu_btn.set_has_frame(false);
 
         // Shown only while a replay is being downloaded. Clicking it returns
@@ -291,11 +326,6 @@ impl App {
         toast_overlay.set_child(Some(&toolbar));
         window.set_content(Some(&toast_overlay));
 
-        let language = if cfg.language == "auto" || cfg.language.is_empty() {
-            system_language()
-        } else {
-            cfg.language.clone()
-        };
         let app = Rc::new(Self {
             window,
             toolbar,
@@ -308,6 +338,7 @@ impl App {
             search,
             refresh_btn,
             add_btn,
+            menu_btn,
             stack,
             home_box,
             home_scroll,
@@ -501,6 +532,7 @@ impl App {
 
     fn apply_language(self: &Rc<Self>) {
         let en = self.is_english();
+        crate::set_messages_locale(&self.cfg.borrow().language);
         self.window.set_title(Some(if en { "Kick Lite" } else { "Kick Lite" }));
         self.search.set_placeholder_text(Some(if en { "Channel name or Kick link…" } else { "Kanal adı veya Kick bağlantısı…" }));
         self.sidebar_title.set_text(if en { "Following" } else { "Takip edilenler" });
@@ -508,6 +540,16 @@ impl App {
         self.refresh_btn.set_tooltip_text(Some(if en { "Refresh followed channels" } else { "Takip edilenleri yenile" }));
         self.add_btn.set_tooltip_text(Some(if en { "Add channel" } else { "Kanal ekle" }));
         self.search.set_tooltip_text(Some(if en { "Enter a channel name or Kick link" } else { "Kanal adı veya Kick bağlantısı gir" }));
+        self.menu_btn.set_tooltip_text(Some(if en { "Menu" } else { "Menü" }));
+        // Rebuild the model after the current event finishes: the language
+        // action is invoked from inside the open popover, where GTK may ignore
+        // a model swap. Dropping and resetting the model forces a fresh popover.
+        let menu_btn = self.menu_btn.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(0), move || {
+            menu_btn.set_menu_model(None::<&gio::Menu>);
+            menu_btn.set_menu_model(Some(&build_menu(en)));
+            glib::ControlFlow::Break
+        });
         self.download_indicator.set_tooltip_text(Some(if en {
             "Download in progress — click to view"
         } else {
