@@ -599,7 +599,12 @@ impl PlayerPage {
         self.quality_box.append(&auto);
 
         if variants.is_empty() {
-            let label = gtk::Label::new(Some(app.text("Kalite seçeneği yok", "No quality options")));
+            let message = if self.quality_btn.is_sensitive() {
+                app.text("Kalite seçeneği yok", "No quality options")
+            } else {
+                app.text("Çevrimdışı indirme", "Offline download")
+            };
+            let label = gtk::Label::new(Some(message));
             label.add_css_class("dim-label");
             label.set_margin_top(4);
             label.set_margin_bottom(4);

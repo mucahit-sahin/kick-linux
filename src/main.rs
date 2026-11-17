@@ -1,5 +1,6 @@
 mod api;
 mod config;
+mod download;
 mod fmt;
 mod mpv;
 mod ui;

@@ -3,6 +3,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use std::io::Read;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -47,8 +48,17 @@ fn get_json<T: DeserializeOwned>(url: &str) -> Result<T> {
     serde_json::from_str(&text).with_context(|| "Could not parse Kick response")
 }
 
-fn get_text(url: &str) -> Result<String> {
+pub(crate) fn get_text(url: &str) -> Result<String> {
     Ok(request(url)?.into_string()?)
+}
+
+/// Downloads the raw bytes of a URL using the same headers as the other API
+/// calls. Used by the built-in HLS downloader for playlist segments.
+pub fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
+    let response = request(url)?;
+    let mut data = Vec::new();
+    response.into_reader().read_to_end(&mut data)?;
+    Ok(data)
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -274,7 +284,7 @@ pub fn hls_variants(master_url: &str) -> Result<Vec<Variant>> {
     Ok(out)
 }
 
-fn resolve_url(base: &str, rel: &str) -> String {
+pub(crate) fn resolve_url(base: &str, rel: &str) -> String {
     if rel.starts_with("http://") || rel.starts_with("https://") {
         return rel.to_string();
     }

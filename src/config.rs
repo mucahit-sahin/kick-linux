@@ -24,6 +24,31 @@ pub struct ResumeVideo {
     pub duration: Option<f64>,
 }
 
+/// A replay that was downloaded for offline playback.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DownloadItem {
+    /// Stable identifier, also used as the name of the storage directory.
+    pub id: String,
+    pub title: String,
+    pub channel: String,
+    pub channel_slug: String,
+    pub subtitle: String,
+    /// Human-readable quality label chosen at download time.
+    pub quality: String,
+    /// Original online master URL (used to avoid duplicate downloads).
+    pub master: String,
+    /// Directory under `downloads_dir()` holding the playlist and segments.
+    pub dir: String,
+    pub duration: Option<f64>,
+    #[serde(default)]
+    pub position: f64,
+    /// Total number of bytes downloaded.
+    #[serde(default)]
+    pub bytes: u64,
+    #[serde(default)]
+    pub created_at: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
     #[serde(default)]
@@ -47,6 +72,8 @@ pub struct Config {
     pub resume_positions: HashMap<String, f64>,
     #[serde(default)]
     pub resume_videos: Vec<ResumeVideo>,
+    #[serde(default)]
+    pub downloads: Vec<DownloadItem>,
 }
 
 fn default_volume() -> f64 {
@@ -73,6 +100,7 @@ impl Default for Config {
             silence_duration: default_silence_duration(),
             resume_positions: HashMap::new(),
             resume_videos: Vec::new(),
+            downloads: Vec::new(),
         }
     }
 }
@@ -103,6 +131,12 @@ impl Config {
 
 pub fn config_dir() -> PathBuf {
     gtk::glib::user_config_dir().join("kick-lite")
+}
+
+/// Where downloaded HLS playlists and their segments are stored.
+/// Media files belong in the data directory, not next to the settings.
+pub fn downloads_dir() -> PathBuf {
+    gtk::glib::user_data_dir().join("kick-lite").join("downloads")
 }
 
 fn config_path() -> PathBuf {

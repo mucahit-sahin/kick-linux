@@ -7,6 +7,8 @@ A lightweight desktop client written in Rust for Linux, for watching Kick.com li
 - Open by Kick channel name, channel URL, or VOD URL
 - Play livestreams and VODs
 - HLS quality selection
+- Download replays in the quality of your choice and watch them later offline
+  (stored under `~/.local/share/kick-lite/downloads`, listed on the home page)
 - Play/pause, seeking, volume and fullscreen controls
 - Skip silent parts in replays (VOD), can be toggled on/off
 - Silence threshold (dB) and minimum silence duration adjustable from the menu

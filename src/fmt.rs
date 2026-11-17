@@ -38,6 +38,21 @@ pub fn duration(secs: f64) -> String {
     }
 }
 
+/// Bytes -> "1.2 MB", "540 kB", ...
+pub fn size(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    let value = bytes as f64;
+    if value < KB {
+        format!("{bytes} B")
+    } else if value < KB * KB {
+        format!("{:.0} kB", value / KB)
+    } else if value < KB * KB * KB {
+        format!("{:.1} MB", value / (KB * KB))
+    } else {
+        format!("{:.2} GB", value / (KB * KB * KB))
+    }
+}
+
 /// Shortens long titles for the window title.
 pub fn shorten(text: &str, max_chars: usize) -> String {
     let text = text.trim();

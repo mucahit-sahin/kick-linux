@@ -231,7 +231,6 @@ pub fn render(app: &Rc<App>) {
     for (index, vod) in vods.iter().enumerate() {
         let row = gtk::ListBoxRow::new();
         row.set_widget_name(&index.to_string());
-        row.set_activatable(vod.url().is_some());
 
         let content = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         content.set_margin_top(10);
@@ -239,9 +238,19 @@ pub fn render(app: &Rc<App>) {
         content.set_margin_start(14);
         content.set_margin_end(14);
 
-        let icon = gtk::Image::from_icon_name("media-playback-start-symbolic");
-        icon.add_css_class("dim-label");
-        icon.set_valign(gtk::Align::Center);
+        let play = gtk::Button::from_icon_name("media-playback-start-symbolic");
+        play.set_has_frame(false);
+        play.add_css_class("flat");
+        play.set_valign(gtk::Align::Center);
+        play.set_tooltip_text(Some(app.text("Tekrarı oynat", "Play replay")));
+        {
+            let a = app.clone();
+            let playable = vod.clone();
+            play.connect_clicked(move |_| a.play_vod(playable.clone()));
+        }
+        if vod.url().is_none() {
+            play.set_sensitive(false);
+        }
 
         let texts = gtk::Box::new(gtk::Orientation::Vertical, 3);
         texts.set_hexpand(true);
@@ -294,23 +303,25 @@ pub fn render(app: &Rc<App>) {
             }
         }
 
-        content.append(&icon);
+        let download = gtk::Button::from_icon_name("document-save-symbolic");
+        download.set_has_frame(false);
+        download.add_css_class("flat");
+        download.set_valign(gtk::Align::Center);
+        download.set_tooltip_text(Some(app.text("Kalite seçerek indir", "Download with quality selection")));
+        {
+            let a = app.clone();
+            let downloadable = vod.clone();
+            download.connect_clicked(move |_| a.download_vod(downloadable.clone()));
+        }
+        if vod.url().is_none() {
+            download.set_sensitive(false);
+        }
+
+        content.append(&play);
         content.append(&texts);
+        content.append(&download);
         row.set_child(Some(&content));
         list.append(&row);
-    }
-
-    {
-        let a = app.clone();
-        list.connect_row_activated(move |_, row| {
-            let Ok(index) = row.widget_name().parse::<usize>() else {
-                return;
-            };
-            let vod = a.current_vods.borrow().get(index).cloned();
-            if let Some(vod) = vod {
-                a.play_vod(vod);
-            }
-        });
     }
 
     container.append(&list);

@@ -4,7 +4,7 @@ pub mod channel;
 pub mod home;
 pub mod player;
 
-use crate::{api, config, fmt, mpv};
+use crate::{api, config, download, fmt, mpv};
 use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
@@ -13,6 +13,8 @@ use libadwaita::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Instant;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -32,6 +34,9 @@ pub struct Media {
     pub url: String,
     pub duration: Option<f64>,
     pub start: f64,
+    /// Set when playing an offline download; the position is stored on the
+    /// DownloadItem instead of the online resume list.
+    pub download_id: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -46,6 +51,15 @@ struct SidebarRow {
     _row: gtk::ListBoxRow,
     dot: gtk::Label,
     info: gtk::Label,
+}
+
+#[derive(Clone)]
+pub struct ActiveDownload {
+    pub title: String,
+    pub done: usize,
+    pub total: usize,
+    pub bytes: u64,
+    pub cancel: Arc<AtomicBool>,
 }
 
 pub struct App {
@@ -87,6 +101,7 @@ pub struct App {
     load_started: Cell<Option<Instant>>,
     resume_pending: Cell<Option<f64>>,
     live_catch_up: Cell<bool>,
+    pub active_downloads: RefCell<HashMap<String, ActiveDownload>>,
 }
 
 impl App {
@@ -298,7 +313,9 @@ impl App {
             load_started: Cell::new(None),
             resume_pending: Cell::new(None),
             live_catch_up: Cell::new(false),
+            active_downloads: RefCell::new(HashMap::new()),
         });
+        download::cleanup(&app.cfg.borrow().downloads);
         app.apply_language();
 
         {
@@ -967,6 +984,246 @@ impl App {
         }
     }
 
+    // ---- downloads ----
+
+    /// Fetches the available qualities of a replay and lets the user pick one.
+    pub fn download_vod(self: &Rc<Self>, vod: api::Vod) {
+        let Some(master) = vod.url().map(str::to_string) else {
+            self.toast(self.text("Bu tekrarın oynatma bağlantısı yok", "This replay has no playable URL"));
+            return;
+        };
+        let (slug, name) = self
+            .current_channel
+            .borrow()
+            .as_ref()
+            .map(|ch| (ch.slug.clone(), ch.display_name().to_string()))
+            .unwrap_or_default();
+        let a = self.clone();
+        spawn_task(
+            move || api::hls_variants(&master).unwrap_or_default(),
+            move |variants| a.show_quality_picker(vod, variants, slug, name),
+        );
+    }
+
+    fn show_quality_picker(
+        self: &Rc<Self>,
+        vod: api::Vod,
+        variants: Vec<api::Variant>,
+        slug: String,
+        name: String,
+    ) {
+        let dialog = adw::Dialog::builder()
+            .title(self.text("Kalite seç", "Choose quality"))
+            .content_width(400)
+            .content_height(460)
+            .build();
+
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        content.set_margin_top(18);
+        content.set_margin_bottom(18);
+        content.set_margin_start(18);
+        content.set_margin_end(18);
+
+        let heading = gtk::Label::new(Some(self.text("İndirilecek kaliteyi seç", "Select the quality to download")));
+        heading.add_css_class("title-3");
+        heading.set_xalign(0.0);
+        let title = gtk::Label::new(Some(vod.title()));
+        title.add_css_class("dim-label");
+        title.set_xalign(0.0);
+        title.set_wrap(true);
+        title.set_max_width_chars(46);
+        content.append(&heading);
+        content.append(&title);
+
+        let list = gtk::ListBox::new();
+        list.add_css_class("boxed-list");
+        list.set_selection_mode(gtk::SelectionMode::None);
+
+        let mut choices: Vec<(String, Option<String>)> = Vec::new();
+        choices.push((self.text("Otomatik (en iyi)", "Auto (best)").to_string(), None));
+        for variant in &variants {
+            choices.push((variant.label(), Some(variant.url.clone())));
+        }
+
+        for (label, url) in choices {
+            let row = adw::ActionRow::builder()
+                .title(&label)
+                .activatable(true)
+                .build();
+            let weak = dialog.downgrade();
+            let a = self.clone();
+            let vod = vod.clone();
+            let slug = slug.clone();
+            let name = name.clone();
+            let label = label.clone();
+            row.connect_activated(move |_| {
+                if let Some(dialog) = weak.upgrade() {
+                    dialog.close();
+                }
+                a.start_download(&vod, url.clone(), label.clone(), &slug, &name);
+            });
+            list.append(&row);
+        }
+
+        let scroll = gtk::ScrolledWindow::new();
+        scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        scroll.set_min_content_height(240);
+        scroll.set_max_content_height(320);
+        scroll.set_child(Some(&list));
+        content.append(&scroll);
+
+        let cancel = gtk::Button::with_label(self.text("İptal", "Cancel"));
+        cancel.set_halign(gtk::Align::End);
+        let weak = dialog.downgrade();
+        cancel.connect_clicked(move |_| {
+            if let Some(dialog) = weak.upgrade() {
+                dialog.close();
+            }
+        });
+        content.append(&cancel);
+
+        dialog.set_child(Some(&content));
+        dialog.present(Some(&self.window));
+    }
+
+    pub fn start_download(
+        self: &Rc<Self>,
+        vod: &api::Vod,
+        variant: Option<String>,
+        quality: String,
+        slug: &str,
+        name: &str,
+    ) {
+        let Some(master) = vod.url().map(str::to_string) else {
+            return;
+        };
+        let (id, dir) = download::new_ids(slug);
+        let params = download::Params {
+            master,
+            variant,
+            quality,
+            title: vod.title().to_string(),
+            channel: name.to_string(),
+            channel_slug: slug.to_string(),
+            subtitle: vod_subtitle(vod),
+            duration: vod.duration_secs(),
+            id: id.clone(),
+            dir,
+        };
+        let handle = download::begin(params);
+        self.active_downloads.borrow_mut().insert(
+            id.clone(),
+            ActiveDownload {
+                title: vod.title().to_string(),
+                done: 0,
+                total: 0,
+                bytes: 0,
+                cancel: handle.cancel.clone(),
+            },
+        );
+        if self.stack.visible_child_name().as_deref() == Some("home") {
+            home::render(self);
+        }
+
+        let a = self.clone();
+        let progress_id = id.clone();
+        let finished_id = id.clone();
+        glib::spawn_future_local(async move {
+            while let Ok(event) = handle.rx.recv().await {
+                match event {
+                    download::Event::Progress { done, total, bytes } => {
+                        if let Some(active) = a.active_downloads.borrow_mut().get_mut(&progress_id) {
+                            active.done = done;
+                            active.total = total;
+                            active.bytes = bytes;
+                        }
+                        if a.stack.visible_child_name().as_deref() == Some("home") {
+                            home::render(&a);
+                        }
+                    }
+                    download::Event::Finished(result) => {
+                        a.active_downloads.borrow_mut().remove(&finished_id);
+                        match result {
+                            Ok(outcome) => {
+                                let mut cfg = a.cfg.borrow_mut();
+                                cfg.downloads.push(outcome.item);
+                                let snapshot = cfg.clone();
+                                drop(cfg);
+                                if let Err(err) = config::save(&snapshot) {
+                                    eprintln!("Could not save the download list: {err}");
+                                }
+                                a.toast(a.text("İndirme tamamlandı", "Download complete"));
+                            }
+                            Err(err) => {
+                                a.toast(&format!(
+                                    "{}: {err}",
+                                    a.text("İndirme başarısız", "Download failed")
+                                ));
+                            }
+                        }
+                        if a.stack.visible_child_name().as_deref() == Some("home") {
+                            home::render(&a);
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    pub fn cancel_download(&self, id: &str) {
+        if let Some(active) = self.active_downloads.borrow().get(id) {
+            active
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    pub fn play_download(self: &Rc<Self>, item: config::DownloadItem) {
+        let path = download::playlist_path(&item);
+        if !path.exists() {
+            self.toast(self.text("İndirilen dosya bulunamadı", "Downloaded file not found"));
+            return;
+        }
+        let url = path.to_string_lossy().to_string();
+        let media = Media {
+            kind: MediaKind::Vod,
+            title: item.title.clone(),
+            subtitle: item.subtitle.clone(),
+            master: url.clone(),
+            url,
+            duration: item.duration,
+            start: item.position,
+            download_id: Some(item.id.clone()),
+        };
+        self.play_media(media, "home");
+    }
+
+    pub fn delete_download(self: &Rc<Self>, id: &str) {
+        let Some(item) = self
+            .cfg
+            .borrow()
+            .downloads
+            .iter()
+            .find(|item| item.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        download::remove(&item);
+        {
+            let mut cfg = self.cfg.borrow_mut();
+            cfg.downloads.retain(|item| item.id != id);
+            let snapshot = cfg.clone();
+            drop(cfg);
+            if let Err(err) = config::save(&snapshot) {
+                self.toast(&format!("{}: {err}", self.text("Kayıt silinemedi", "Could not remove item")));
+                return;
+            }
+        }
+        home::render(&self);
+    }
+
     // ---- playback ----
 
     pub fn play_live(self: &Rc<Self>) {
@@ -997,6 +1254,7 @@ impl App {
                                 url,
                                 duration: None,
                                 start: 0.0,
+                                download_id: None,
                             };
                             a.play_media(media, "channel");
                         }
@@ -1034,6 +1292,7 @@ impl App {
             url,
             duration: vod.duration_secs(),
             start,
+            download_id: None,
         };
         self.play_media(media, "channel");
     }
@@ -1047,6 +1306,7 @@ impl App {
             url: video.url,
             duration: video.duration,
             start: video.position,
+            download_id: None,
         };
         self.play_media(media, "home");
     }
@@ -1087,17 +1347,24 @@ impl App {
             self.toast(&format!("{err:#}"));
         }
 
-        let master = media.master.clone();
-        let a = self.clone();
-        spawn_task(
-            move || api::hls_variants(&master).unwrap_or_default(),
-            move |variants| {
-                if a.media_seq.get() != seq {
-                    return;
-                }
-                a.player_page.set_variants(&a, variants);
-            },
-        );
+        // Offline downloads have a fixed quality baked into the local playlist.
+        if media.download_id.is_none() {
+            self.player_page.quality_btn.set_sensitive(true);
+            let master = media.master.clone();
+            let a = self.clone();
+            spawn_task(
+                move || api::hls_variants(&master).unwrap_or_default(),
+                move |variants| {
+                    if a.media_seq.get() != seq {
+                        return;
+                    }
+                    a.player_page.set_variants(&a, variants);
+                },
+            );
+        } else {
+            self.player_page.quality_btn.set_sensitive(false);
+            self.player_page.set_variants(self, Vec::new());
+        }
     }
 
     pub fn switch_quality(self: &Rc<Self>, url: Option<String>, label: String) {
@@ -1337,6 +1604,7 @@ impl App {
                                     url,
                                     duration: vod.duration_secs(),
                                     start,
+                                    download_id: None,
                                 };
                                 a.play_media(media, "home");
                             }
@@ -1449,7 +1717,7 @@ impl App {
         } else if let Some(pos) = self.player.position() {
             self.player_page.pos.set_text(&fmt::duration(pos));
             self.player_page.seek.set_value(pos);
-            if media.kind == MediaKind::Vod {
+            if media.kind == MediaKind::Vod && media.download_id.is_none() {
                 self.cfg
                     .borrow_mut()
                     .resume_positions
@@ -1469,6 +1737,17 @@ impl App {
         let Some(pos) = self.player.position() else {
             return;
         };
+        if let Some(id) = &media.download_id {
+            let mut cfg = self.cfg.borrow_mut();
+            if let Some(item) = cfg.downloads.iter_mut().find(|item| &item.id == id) {
+                if media.duration.is_some_and(|d| pos >= d - 5.0) {
+                    item.position = 0.0;
+                } else if pos > 1.0 {
+                    item.position = pos;
+                }
+            }
+            return;
+        }
         let duration = media.duration.or_else(|| self.player.duration());
         let mut cfg = self.cfg.borrow_mut();
         if duration.is_some_and(|d| pos >= d - 5.0) {
