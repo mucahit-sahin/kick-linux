@@ -2,6 +2,20 @@
 
 A lightweight desktop client written in Rust for Linux, for watching Kick.com livestreams and replays. It does not embed a web browser; it uses GTK4, libadwaita and libmpv.
 
+## Screenshots
+
+Home — followed channels, live status and continue watching:
+
+<a href="docs/home.png"><img src="docs/home.png" alt="Kick Lite home page" width="800"></a>
+
+Channel — live status, follow button and replays:
+
+<a href="docs/channel.png"><img src="docs/channel.png" alt="Kick Lite channel page" width="800"></a>
+
+Player — video playback with quality, speed and silence controls:
+
+<a href="docs/player.png"><img src="docs/player.png" alt="Kick Lite video player" width="800"></a>
+
 ## Features
 
 - Open by Kick channel name, channel URL, or VOD URL
