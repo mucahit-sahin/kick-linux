@@ -1,4 +1,4 @@
-//! Ana sayfa: takip edilen kanalların canlı durumları.
+//! Home page: live statuses of followed channels.
 
 use crate::config;
 use crate::fmt;

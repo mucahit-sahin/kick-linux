@@ -1,33 +1,30 @@
 # Kick Lite
 
-Linux için Rust ile yazılmış, Kick.com canlı yayınlarını ve yayın tekrarlarını
-izlemeye yarayan hafif bir masaüstü istemcisi. Web tarayıcısı gömmez; GTK4,
-libadwaita ve libmpv kullanır.
+A lightweight desktop client written in Rust for Linux, for watching Kick.com livestreams and replays. It does not embed a web browser; it uses GTK4, libadwaita and libmpv.
 
-## Özellikler
+## Features
 
-- Kick kanal adı, kanal URL'si veya VOD URL'si ile açma
-- Canlı yayın ve VOD oynatma
-- HLS kalite seçimi
-- Oynat/duraklat, arama, ses ve tam ekran kontrolleri
-- Yayın tekrarlarında (VOD) sessiz kısımları atlama (açılıp kapatılabilir)
-- Sessizlik eşiği (dB) ve en kısa sessizlik süresi menüden ayarlanabilir
-- Takip edilen kanalları `~/.config/kick-lite/config.json` içinde saklama
-- Wayland ve X11 desteği
-- Görsel küçük resimleri ve sohbeti yüklemez; bellek kullanımını düşük tutar
+- Open by Kick channel name, channel URL, or VOD URL
+- Play livestreams and VODs
+- HLS quality selection
+- Play/pause, seeking, volume and fullscreen controls
+- Skip silent parts in replays (VOD), can be toggled on/off
+- Silence threshold (dB) and minimum silence duration adjustable from the menu
+- Store followed channels in `~/.config/kick-lite/config.json`
+- Wayland and X11 support
+- Does not load visual thumbnails or chat; keeps memory usage low
 
-## Gereksinimler
+## Requirements
 
-Arch/CachyOS üzerinde:
+On Arch/CachyOS:
 
 ```bash
 sudo pacman -S --needed rust gtk4 libadwaita mpv libepoxy
 ```
 
-Dağıtımınızda paket adları farklı olabilir. Derleme sırasında `pkg-config`
-üzerinden GTK4, libadwaita, libmpv ve OpenGL/EGL geliştirme dosyaları bulunmalıdır.
+Package names may differ on your distribution. When building, the development files for GTK4, libadwaita, libmpv and OpenGL/EGL must be discoverable through `pkg-config`.
 
-## Derleme ve çalıştırma
+## Building and running
 
 ```bash
 cargo build --release
@@ -36,33 +33,28 @@ cargo build --release
 ./target/release/kick-lite 'https://kick.com/xqc?video=VOD_ID'
 ```
 
-Uygulama Kick'in herkese açık, resmî olmayan API uç noktalarını kullanır.
-Kick tarafındaki API veya Cloudflare politikası değişirse kanal/VOD bilgisi
-alınamayabilir. Canlı kanal listesi için herkese açık ve kararlı bir API
-bulunmadığından kanalı adıyla açmak gerekir.
+The application uses Kick's public, unofficial API endpoints. If Kick's API or Cloudflare policy changes, channel/VOD information may no longer be retrievable. Since there is no public, stable API for the live channel list, channels must be opened by name.
 
-## Kısayollar
+## Shortcuts
 
-| Kısayol | İşlev |
+| Shortcut | Action |
 | --- | --- |
-| `Space` | Oynat / duraklat |
-| `M` | Sesi kapat / aç |
-| `F` | Tam ekran |
-| `Esc` | Oynatıcıdan geri dön / tam ekrandan çık |
-| `←` / `→` | 5 saniye geri / ileri |
+| `Space` | Play / pause |
+| `M` | Mute / unmute |
+| `F` | Fullscreen |
+| `Esc` | Back from player / exit fullscreen |
+| `←` / `→` | Seek 5 seconds backward / forward |
 
-## Kurulum
+## Installation
 
-Yerel kullanıcıya kurmak için:
+To install for the local user:
 
 ```bash
 ./install.sh
 ```
 
-Bu işlem ikiliyi `~/.local/bin`, masaüstü dosyasını
-`~/.local/share/applications` ve ikonu `~/.local/share/icons/hicolor/scalable/apps`
-altına kopyalar.
+This copies the binary to `~/.local/bin`, the desktop file to `~/.local/share/applications`, and the icon to `~/.local/share/icons/hicolor/scalable/apps`.
 
-## Lisans
+## License
 
 MIT

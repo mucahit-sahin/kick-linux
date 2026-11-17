@@ -1,8 +1,8 @@
-//! libmpv için minimal FFI ve OpenGL (GtkGLArea) üzerinden video çizimi.
+//! Minimal FFI for libmpv and video rendering through OpenGL (GtkGLArea).
 //!
-//! mpv'nin "render API"si kullanılır: video, mpv'nin kendi penceresinde değil,
-//! GTK4'ün GLArea'sının framebuffer'ına çizilir. Böylece Wayland ve X11'de
-//! tek pencere içinde, düşük bellek kullanımıyla oynatma yapılabilir.
+//! mpv's "render API" is used: the video is drawn not in mpv's own window,
+//! but into the framebuffer of GTK4's GLArea. This allows playback in a
+//! single window with low memory usage on both Wayland and X11.
 
 #![allow(non_snake_case)]
 
@@ -31,7 +31,7 @@ pub struct mpv_event {
     pub data: *mut c_void,
 }
 
-/// `MPV_EVENT_LOG_MESSAGE` olayının veri yapısı (client.h).
+/// Data structure of the `MPV_EVENT_LOG_MESSAGE` event (client.h).
 #[repr(C)]
 pub struct mpv_event_log_message {
     pub prefix: *const c_char,
@@ -40,18 +40,18 @@ pub struct mpv_event_log_message {
     pub log_level: c_int,
 }
 
-// mpv_event_id (yalnızca kullandığımız değerler)
+// mpv_event_id (only the values we use)
 const MPV_EVENT_NONE: c_int = 0;
 const MPV_EVENT_SHUTDOWN: c_int = 1;
 const MPV_EVENT_LOG_MESSAGE: c_int = 2;
 
-/// Sessizlik sırasında kullanılacak oynatma hızı. Normal hızla 4 saniyelik
-/// bir boşluk ~0.4 saniyeye iner; bu, "atlama" etkisini verir.
+/// Playback speed used during silence. At normal speed a 4-second gap
+/// shrinks to ~0.4 seconds; this gives the "skipping" effect.
 const SKIP_SPEED: f64 = 10.0;
-/// Bir `silence_start` raporunun güncel oynatmayla ilgili sayılabilmesi için
-/// izin verilen konum farkı (saniye).
+/// Allowed position difference (seconds) for a `silence_start` report to
+/// be considered relevant to the current playback.
 const SILENCE_POS_TOLERANCE: f64 = 2.5;
-/// Bir çağrıda işlenecek azami olay sayısı (kuyruğu tıkamamak için).
+/// Maximum number of events processed in one call (to avoid clogging the queue).
 const MAX_EVENTS_PER_POLL: usize = 256;
 
 #[repr(C)]
@@ -148,22 +148,22 @@ extern "C" {
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
 }
 
-/// glibc'te RTLD_DEFAULT ((void *) 0)
+/// RTLD_DEFAULT on glibc ((void *) 0)
 const RTLD_DEFAULT: *mut c_void = std::ptr::null_mut();
 
 pub struct Player {
     handle: *mut mpv_handle,
     render: Cell<*mut mpv_render_context>,
-    /// Güncelleme geri çağrısının kullandığı WeakRef'in sahibi.
+    /// Owner of the WeakRef used by the update callback.
     keep: RefCell<Option<Box<AreaWeak>>>,
     alive: Cell<bool>,
-    /// Kullanıcının açıp kapattığı tercih.
+    /// User-controlled preference (on/off).
     skip_silence: Cell<bool>,
-    /// Geçerli ortamda atlamaya izin var mı (yalnızca VOD'larda).
+    /// Whether skipping is allowed for the current media (VODs only).
     silence_allowed: Cell<bool>,
-    /// Şu anda bir sessizliğin içinde hızlandırılmış oynatma yapılıyor mu?
+    /// Whether playback is currently sped up inside a silent section.
     silence_active: Cell<bool>,
-    /// Sessizliktan önceki oynatma hızı (sonra geri yüklenir).
+    /// Playback speed before the silence (restored afterwards).
     saved_speed: Cell<f64>,
 }
 
@@ -172,7 +172,7 @@ impl Player {
         unsafe {
             let handle = mpv_create();
             if handle.is_null() {
-                bail!("libmpv oluşturulamadı");
+                bail!("Could not create libmpv");
             }
             let player = Self {
                 handle,
@@ -189,16 +189,15 @@ impl Player {
                     eprintln!("mpv: {err}");
                 }
             }
-            // `silencedetect` ileti düzeyi "v" olduğundan istemciye gelen
-            // iletiler için alt sınırı düşürüyoruz. `msg-level=ffmpeg=v`
-            // yalnızca bu filtreyle ilgili iletileri üretir; diğer modüller
-            // sessiz kalır.
+            // Since the `silencedetect` log level is "v", we lower the minimum level
+            // for messages sent to the client. `msg-level=ffmpeg=v` only produces
+            // messages related to this filter; other modules stay silent.
             let level = CString::new("terminal-default").unwrap();
             mpv_request_log_messages(handle, level.as_ptr());
             let rc = mpv_initialize(handle);
             if rc < 0 {
                 mpv_terminate_destroy(handle);
-                bail!("mpv başlatılamadı (hata kodu {rc})");
+                bail!("Could not initialize mpv (error code {rc})");
             }
             Ok(player)
         }
@@ -209,12 +208,12 @@ impl Player {
         let value = CString::new(value)?;
         let rc = unsafe { mpv_set_option_string(self.handle, name.as_ptr(), value.as_ptr()) };
         if rc < 0 {
-            bail!("mpv ayarı uygulanamadı: {}", name.to_string_lossy());
+            bail!("Could not apply mpv option: {}", name.to_string_lossy());
         }
         Ok(())
     }
 
-    /// GLArea gerçekleştiğinde (realize) mpv render bağlamını kurar.
+    /// Sets up the mpv render context when the GLArea is realized.
     pub fn attach(&self, area: &gtk::GLArea) -> bool {
         if !self.render.get().is_null() {
             return true;
@@ -244,7 +243,7 @@ impl Player {
         let mut ctx: *mut mpv_render_context = ptr::null_mut();
         let rc = unsafe { mpv_render_context_create(&mut ctx, self.handle, params.as_mut_ptr()) };
         if rc < 0 {
-            eprintln!("mpv: render bağlamı kurulamadı (hata kodu {rc})");
+            eprintln!("mpv: could not create render context (error code {rc})");
             return false;
         }
 
@@ -258,7 +257,7 @@ impl Player {
         true
     }
 
-    /// GLArea kaybolduğunda render bağlamını serbest bırakır.
+    /// Releases the render context when the GLArea is unrealized.
     pub fn detach(&self) {
         let ctx = self.render.replace(ptr::null_mut());
         if !ctx.is_null() {
@@ -285,7 +284,7 @@ impl Player {
             let (Some(clear_color), Some(clear), Some(get_integerv)) =
                 (gl::clear_color(), gl::clear(), gl::get_integerv())
             else {
-                eprintln!("mpv: OpenGL işlevleri yüklenemedi");
+                eprintln!("mpv: could not load OpenGL functions");
                 return;
             };
 
@@ -326,9 +325,9 @@ impl Player {
     pub fn load(&self, url: &str, start: Option<f64>) -> Result<()> {
         self.set_paused(false);
         self.clear_silence();
-        // Başlangıç seek'i dosya yüklenip süre bilgisi hazır olduktan sonra
-        // uygulanır. Bazı HLS VOD'larda loadfile seçenekleriyle verilen start
-        // parametresi yayının hata vermesine neden olabiliyor.
+        // The initial seek is applied after the file is loaded and the duration is
+        // available. On some HLS VODs, a `start` parameter passed with the loadfile
+        // options can cause the stream to fail.
         let _ = start;
         self.command(&["loadfile", url, "replace"])
     }
@@ -347,7 +346,7 @@ impl Player {
         ptrs.push(ptr::null());
         let rc = unsafe { mpv_command(self.handle, ptrs.as_ptr()) };
         if rc < 0 {
-            bail!("mpv komutu başarısız: {:?} (kod {rc})", args);
+            bail!("mpv command failed: {:?} (code {rc})", args);
         }
         Ok(())
     }
@@ -381,8 +380,8 @@ impl Player {
     pub fn set_speed(&self, speed: f64) {
         let value = speed.clamp(0.25, 8.0);
         if self.silence_active.get() {
-            // Kullanıcı sessizlik sırasında hız değiştirirse, sessizlik
-            // bittikten sonra bu yeni hıza dönüyoruz.
+            // If the user changes the speed during a silence, we return to
+            // this new speed once the silence ends.
             self.saved_speed.set(value);
         } else {
             self.set_speed_raw(value);
@@ -411,7 +410,7 @@ impl Player {
         self.get_f64("duration")
     }
 
-    /// Oynatma konumunun ilerisinde mpv'nin tamponladığı süre (saniye).
+    /// Duration buffered by mpv ahead of the playback position (seconds).
     pub fn cache_duration(&self) -> Option<f64> {
         self.get_f64("demuxer-cache-duration")
     }
@@ -443,10 +442,10 @@ impl Player {
         let _ = self.command(&["seek", &delta, "relative+exact"]);
     }
 
-    // ---- sessiz kısımları atlama ----
+    // ---- skipping silent parts ----
 
-    /// Özelliği açar/kapatır. Kapatılınca hızlandırılmış oynatma varsa
-    /// önceki hıza dönülür.
+    /// Turns the feature on/off. When disabled, any sped-up playback returns
+    /// to the previous speed.
     pub fn set_skip_silence(&self, enabled: bool) {
         self.skip_silence.set(enabled);
         if !enabled {
@@ -454,14 +453,14 @@ impl Player {
         }
     }
 
-    /// Sessizlik algılama eşiklerini değiştirir. `af set` komutu ses zincirini
-    /// yeniden kurar; oynatma devam eder.
+    /// Changes the silence-detection thresholds. The `af set` command rebuilds
+    /// the audio chain; playback continues.
     pub fn apply_silence_filter(&self, noise_db: i32, duration: f64) -> Result<()> {
         self.end_silence_skip();
         self.command(&["af", "set", &silence_filter(noise_db, duration)])
     }
 
-    /// Canlı yayınlarda atlama yapılmasın; yalnızca VOD'larda izin verilir.
+    /// No skipping in live streams; only allowed in VODs.
     pub fn set_silence_allowed(&self, allowed: bool) {
         self.silence_allowed.set(allowed);
         if !allowed {
@@ -469,7 +468,7 @@ impl Player {
         }
     }
 
-    /// Yeni bir dosya yüklenirken/oyunatma dururken hızı eski hâline döndür.
+    /// Restores the speed when loading a new file or stopping playback.
     pub fn clear_silence(&self) {
         self.end_silence_skip();
     }
@@ -480,9 +479,9 @@ impl Player {
         }
     }
 
-    /// mpv olay kuyruğunu boşaltır ve `silencedetect` raporlarını işler.
-    /// Ana döngüden (GTK iş parçacığından) çağrılmalıdır; olay verisi bir
-    /// sonraki `mpv_wait_event()` çağrısına kadar geçerlidir.
+    /// Drains the mpv event queue and processes `silencedetect` reports.
+    /// Must be called from the main loop (GTK thread); event data is valid only
+    /// until the next `mpv_wait_event()` call.
     pub fn poll_events(&self) {
         if !self.alive.get() {
             return;
@@ -508,24 +507,24 @@ impl Player {
         }
     }
 
-    /// `silencedetect` bir sessizliğin başladığını/bittiğini bildirdiğinde
-    /// oynatma hızını geçici olarak artırır (ve sonra geri yükler).
+    /// Temporarily increases playback speed (then restores it) when
+    /// `silencedetect` reports that a silence has started/ended.
     ///
-    /// `silence_end` raporu oynatma zaten sessizliğin sonuna gelmişken
-    /// geldiğinden, konuma atlamak yerine sessizlik boyunca hızlandırmak
-    /// daha güvenilirdir: algılama oynatmayla eş zamanlı çalışır.
+    /// Because the `silence_end` report arrives when playback has already
+    /// reached the end of the silence, speeding up through the silence is more
+    /// reliable than seeking: detection runs in sync with playback.
     fn handle_silence_message(&self, text: &str) {
         if !self.skip_silence.get() || !self.silence_allowed.get() {
             return;
         }
         if text.contains("silence_start:") {
             if self.silence_active.get() {
-                return; // yinelenen rapor
+                return; // duplicate report
             }
             let Some(start) = number_after(text, "silence_start:") else {
                 return;
             };
-            // Eski bir raporsa (ör. seek sonrası) tepki verme.
+            // Ignore stale reports (e.g. after a seek).
             if let Some(pos) = self.position() {
                 if (pos - start).abs() > SILENCE_POS_TOLERANCE {
                     return;
@@ -539,7 +538,7 @@ impl Player {
         }
     }
 
-    /// Sınırsız hız ayarı (sessiz atlama için `speed` aralığını aşabilir).
+    /// Unrestricted speed setting (may exceed the `speed` range for silence skipping).
     fn set_speed_raw(&self, speed: f64) {
         let name = CString::new("speed").unwrap();
         let mut value = speed.clamp(0.1, 60.0);
@@ -622,7 +621,7 @@ impl Drop for Player {
     }
 }
 
-/// Metinde `anahtar`dan sonraki ilk sayıyı okur (mpv/ffmpeg günlük satırları için).
+/// Reads the first number after `key` in the text (for mpv/ffmpeg log lines).
 fn number_after(text: &str, key: &str) -> Option<f64> {
     let rest = &text.get(text.find(key)? + key.len()..)?;
     let rest = rest.trim_start();
@@ -632,7 +631,7 @@ fn number_after(text: &str, key: &str) -> Option<f64> {
     rest[..len].parse().ok()
 }
 
-/// `silencedetect` filtre zincirini kullanıcı ayarlarından üretir.
+/// Builds the `silencedetect` filter chain from user settings.
 fn silence_filter(noise_db: i32, duration: f64) -> String {
     format!("lavfi=[silencedetect=noise={noise_db}dB:d={duration:.2}]")
 }
@@ -660,17 +659,17 @@ fn options(noise_db: i32, duration: f64) -> Vec<(&'static str, String)> {
         ("audio-file-auto", "no".into()),
         ("audio-client-name", "Kick Lite".into()),
         ("volume-max", "100".into()),
-        // Sessizlik algılama her zaman etkin; atlama davranışı `skip_silence`
-        // bayrağıyla açılıp kapanır. Böylece açılışta filtre yeniden
-        // başlatılmaz ve konum/zaman damgaları kaymaz.
+        // Silence detection is always enabled; the skipping behavior is toggled by
+        // the `skip_silence` flag. This way the filter is not restarted at startup,
+        // and position/timestamps do not drift.
         ("af", silence_filter(noise_db, duration)),
         ("msg-level", "ffmpeg=v".into()),
     ]
 }
 
 unsafe extern "C" fn gl_proc_address(_ctx: *mut c_void, name: *const c_char) -> *mut c_void {
-    // Önce EGL (Wayland ve çoğu X11 kurulumu), sonra GLX, en son doğrudan
-    // yüklenmiş GL kütüphanesinden dene.
+    // Try EGL first (Wayland and most X11 setups), then GLX, and finally the
+    // directly loaded GL library.
     let proc = eglGetProcAddress(name);
     if !proc.is_null() {
         return proc;
@@ -682,11 +681,10 @@ unsafe extern "C" fn gl_proc_address(_ctx: *mut c_void, name: *const c_char) -> 
     dlsym(RTLD_DEFAULT, name)
 }
 
-/// Gereken birkaç OpenGL işlevini çalışma anında yükler.
+/// Loads the few required OpenGL functions at runtime.
 ///
-/// libepoxy yerine doğrudan EGL/GLX kullanıyoruz: böylece ek bir kütüphaneye
-/// ve onun bağlam tablosuna bağımlı değiliz (epoxy, GTK'nın EGL bağlamında
-/// çökebiliyordu).
+/// We use EGL/GLX directly instead of libepoxy: this avoids depending on an
+/// extra library and its context table (epoxy could crash in GTK's EGL context).
 mod gl {
     use super::*;
     use std::sync::OnceLock;
@@ -721,20 +719,20 @@ mod gl {
     }
 }
 
-/// Gtk nesneleri Send değildir; ama zayıf başvuruyu mpv'nin iş parçacığından
-/// ana döngüye taşımak için yalnızca bir işaretçi olarak kullanıyoruz.
-/// `upgrade()` ve `queue_render()` her zaman ana iş parçacığında çalışır.
+/// GTK objects are not Send; we only use a pointer to carry the weak
+/// reference from mpv's thread to the main loop.
+/// `upgrade()` and `queue_render()` always run on the main thread.
 struct AreaWeak(glib::WeakRef<gtk::GLArea>);
 unsafe impl Send for AreaWeak {}
 
 impl AreaWeak {
-    /// `GLArea` hâlâ yaşıyorsa döndürür (yalnızca ana iş parçacığında çağırın).
+    /// Returns the `GLArea` if it is still alive (call only on the main thread).
     fn area(&self) -> Option<gtk::GLArea> {
         self.0.upgrade()
     }
 }
 
-/// mpv'nin geri çağrı bağlamındaki zayıf başvurunun bir kopyası.
+/// A copy of the weak reference in mpv's callback context.
 fn clone_area_weak(ctx: *mut c_void) -> AreaWeak {
     unsafe {
         let weak = &*(ctx as *const AreaWeak);
@@ -742,18 +740,18 @@ fn clone_area_weak(ctx: *mut c_void) -> AreaWeak {
     }
 }
 
-/// mpv yeni bir kare çizdiğinde (kendi iş parçacığından) çağrılır.
+/// Called by mpv (from its own thread) when it draws a new frame.
 unsafe extern "C" fn on_update(ctx: *mut c_void) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static PENDING: AtomicBool = AtomicBool::new(false);
 
-    // Aynı anda birden çok istek birikmesin; ana döngü zaten kareyi çizecek.
+    // Do not accumulate multiple pending requests; the main loop will draw the frame anyway.
     if PENDING.swap(true, Ordering::SeqCst) {
         return;
     }
 
     let weak = clone_area_weak(ctx);
-    // `invoke` iş parçacığı güvenlidir; kapanış ana döngüde çalışır.
+    // `invoke` is thread-safe; the closure runs on the main loop.
     glib::MainContext::default().invoke(move || {
         PENDING.store(false, Ordering::SeqCst);
         if let Some(area) = weak.area() {
@@ -764,7 +762,7 @@ unsafe extern "C" fn on_update(ctx: *mut c_void) {
     });
 }
 
-// mpv olayları şu an kullanılmıyor; ileride sohbet/durum için genişletilebilir.
+// mpv events are currently unused; can be extended later for chat/status.
 #[allow(dead_code)]
 fn _unused(event: *mut mpv_event) {
     let _ = event;

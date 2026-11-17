@@ -16,19 +16,19 @@ extern "C" {
     fn setlocale(category: i32, locale: *const c_char) -> *mut c_char;
 }
 
-/// glibc'te LC_NUMERIC = 1
+/// LC_NUMERIC = 1 on glibc
 const LC_NUMERIC: i32 = 1;
 
 const APP_ID: &str = "io.github.kicklite.KickLite";
 
 fn main() -> glib::ExitCode {
-    // mpv, sayı yerel ayarının "C" olmasını şart koşar.
+    // mpv requires the numeric locale to be "C".
     unsafe {
         setlocale(LC_NUMERIC, b"C\0".as_ptr() as *const c_char);
     }
 
-    // Komut satırı argümanlarını GApplication'a dosya olarak yorumlatmamak
-    // için kendimiz işliyoruz.
+    // Handle command-line arguments ourselves so GApplication does not
+    // interpret them as files.
     let app = adw::Application::builder()
         .application_id(APP_ID)
         .flags(gtk::gio::ApplicationFlags::HANDLES_COMMAND_LINE)
@@ -63,8 +63,8 @@ fn main() -> glib::ExitCode {
             existing.window.present();
             return;
         }
-        // GTK, başlatma sırasında yerel ayarları değiştirebilir; mpv'den önce
-        // sayı yerel ayarını yeniden "C" yap.
+        // GTK may change the locale during startup; reset the numeric locale
+        // back to "C" before starting mpv.
         unsafe {
             setlocale(LC_NUMERIC, b"C\0".as_ptr() as *const c_char);
         }
@@ -89,8 +89,8 @@ fn main() -> glib::ExitCode {
     app.run()
 }
 
-/// Test ve belgeler için: KICK_LITE_SCREENSHOT=/yol/resim.png
-/// (isteğe bağlı KICK_LITE_SCREENSHOT_DELAY saniye)
+/// For tests and docs: KICK_LITE_SCREENSHOT=/path/to/image.png
+/// (optional KICK_LITE_SCREENSHOT_DELAY in seconds)
 fn maybe_screenshot(window: &adw::ApplicationWindow) {
     let Ok(path) = std::env::var("KICK_LITE_SCREENSHOT") else {
         return;
@@ -111,19 +111,19 @@ fn take_screenshot(window: &adw::ApplicationWindow, path: &str) {
     let snapshot = gtk::Snapshot::new();
     paintable.snapshot(&snapshot, window.width() as f64, window.height() as f64);
     let Some(node) = snapshot.to_node() else {
-        eprintln!("ekran görüntüsü: düğüm oluşturulamadı");
+        eprintln!("screenshot: could not create node");
         return;
     };
     let renderer = gtk::gsk::CairoRenderer::new();
     let surface = window.surface();
     if let Err(err) = renderer.realize(surface.as_ref()) {
-        eprintln!("ekran görüntüsü: renderer kurulamadı: {err}");
+        eprintln!("screenshot: could not set up renderer: {err}");
         return;
     }
     let texture = renderer.render_texture(&node, None);
     match texture.save_to_png(path) {
-        Ok(()) => eprintln!("ekran görüntüsü yazıldı: {path}"),
-        Err(err) => eprintln!("ekran görüntüsü yazılamadı: {err}"),
+        Ok(()) => eprintln!("screenshot written: {path}"),
+        Err(err) => eprintln!("screenshot could not be written: {err}"),
     }
     renderer.unrealize();
 }
@@ -141,17 +141,17 @@ fn show_player_error(app: &adw::Application, message: &str) {
     content.set_margin_start(24);
     content.set_margin_end(24);
 
-    let title = gtk::Label::new(Some("Oynatıcı başlatılamadı"));
+    let title = gtk::Label::new(Some("Player could not be started"));
     title.add_css_class("title-2");
     title.set_xalign(0.0);
 
     let text = gtk::Label::new(Some(&format!(
-        "{message}\n\nOynatma için 'mpv' paketinin (libmpv) kurulu olduğundan emin olun."
+        "{message}\n\nMake sure the 'mpv' package (libmpv) is installed for playback."
     )));
     text.set_wrap(true);
     text.set_xalign(0.0);
 
-    let close = gtk::Button::with_label("Kapat");
+    let close = gtk::Button::with_label("Close");
     close.set_halign(gtk::Align::End);
     let win = window.clone();
     close.connect_clicked(move |_| win.close());

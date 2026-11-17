@@ -2,7 +2,7 @@
 name = "kick-lite"
 version = "0.1.0"
 edition = "2021"
-description = "Hafif bir Kick.com canlı yayın ve yayın tekrarı izleyicisi"
+description = "A lightweight Kick.com livestream and replay player"
 license = "MIT"
 
 [dependencies]
@@ -10,8 +10,8 @@ gtk = { package = "gtk4", version = "0.11", features = ["v4_12"] }
 libadwaita = { version = "0.9", features = ["v1_6"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# gzip özelliği kapalı: ureq küçük harfli "accept-encoding: gzip" başlığı
-# gönderiyor ve Cloudflare bu isteği 403 ile engelliyor.
+# The gzip feature is disabled: ureq sends a lowercase "accept-encoding: gzip"
+# header, and Cloudflare blocks this request with a 403.
 ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
 anyhow = "1"
 async-channel = "2"

@@ -1,4 +1,4 @@
-//! Takip edilen kanallar ve oynatıcı ayarlarının kalıcı hâli.
+//! Persistent state for followed channels and player settings.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -34,13 +34,13 @@ pub struct Config {
     pub volume: f64,
     #[serde(default)]
     pub muted: bool,
-    /// VOD'larda sessiz kısımları otomatik atla.
+    /// Automatically skip silent parts in VODs.
     #[serde(default)]
     pub skip_silence: bool,
-    /// Sessiz sayılmak için gereken ses eşiği (dB).
+    /// Audio level threshold (dB) below which audio counts as silence.
     #[serde(default = "default_silence_noise")]
     pub silence_noise_db: i32,
-    /// Raporlanacak en kısa sessizlik süresi (saniye).
+    /// Minimum silence duration to report (seconds).
     #[serde(default = "default_silence_duration")]
     pub silence_duration: f64,
     #[serde(default)]
@@ -113,7 +113,7 @@ pub fn load() -> Config {
     let path = config_path();
     match fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str(&text).unwrap_or_else(|err| {
-            eprintln!("Ayar dosyası okunamadı ({}): {err}", path.display());
+            eprintln!("Could not read settings file ({}): {err}", path.display());
             Config::default()
         }),
         Err(_) => Config::default(),

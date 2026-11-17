@@ -1,4 +1,4 @@
-//! Türkçe biçimlendirme yardımcıları (bağımlılık eklemeden).
+//! Formatting helpers (without adding dependencies).
 
 /// 1234 -> "1.2K", 1_500_000 -> "1.5M"
 pub fn human_count(n: u64) -> String {
@@ -25,7 +25,7 @@ pub fn human_count(n: u64) -> String {
     }
 }
 
-/// Saniye -> "1:02:03" ya da "12:34"
+/// Seconds -> "1:02:03" or "12:34"
 pub fn duration(secs: f64) -> String {
     let total = secs.max(0.0) as u64;
     let h = total / 3600;
@@ -38,7 +38,7 @@ pub fn duration(secs: f64) -> String {
     }
 }
 
-/// Uzun başlıkları pencere başlığı için kısaltır.
+/// Shortens long titles for the window title.
 pub fn shorten(text: &str, max_chars: usize) -> String {
     let text = text.trim();
     if text.chars().count() <= max_chars {
@@ -49,7 +49,7 @@ pub fn shorten(text: &str, max_chars: usize) -> String {
     out
 }
 
-/// Kick'in "2026-11-13 22:04:01" (UTC) biçimini göreli zamana çevirir.
+/// Converts Kick's "2026-11-13 22:04:01" (UTC) format to a relative time.
 pub fn relative_time(stamp: &str) -> String {
     relative_time_lang(stamp, false)
 }
@@ -72,7 +72,7 @@ pub fn relative_time_lang(stamp: &str, english: bool) -> String {
                 86_400..=172_799 => if english { "yesterday" } else { "dün" }.to_string(),
                 172_800..=2_591_999 => if english { format!("{} days ago", diff / 86_400) } else { format!("{} gün önce", diff / 86_400) },
                 _ => {
-                    // GG.AA.YYYY
+                    // DD.MM.YYYY
                     let date = &stamp[..10.min(stamp.len())];
                     let parts: Vec<&str> = date.split('-').collect();
                     if parts.len() == 3 {
@@ -87,7 +87,7 @@ pub fn relative_time_lang(stamp: &str, english: bool) -> String {
     }
 }
 
-/// "2026-11-13 22:04:01" -> yerel olmayan (UTC) unix zamanı
+/// "2026-11-13 22:04:01" -> non-local (UTC) Unix time
 fn parse_utc(s: &str) -> Option<i64> {
     let bytes = s.as_bytes();
     if bytes.len() < 19 {

@@ -1,7 +1,7 @@
 #!/usr/bin/env xdg-open
 [Desktop Entry]
 Name=Kick Lite
-Comment=Hafif Kick.com canlı yayın ve VOD oynatıcısı
+Comment=Lightweight Kick.com livestream and VOD player
 Exec=kick-lite %U
 Icon=io.github.kicklite.KickLite
 Terminal=false

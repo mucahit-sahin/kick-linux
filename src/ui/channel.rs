@@ -1,4 +1,4 @@
-//! Kanal sayfası: canlı durum, takip düğmesi ve yayın tekrarları.
+//! Channel page: live status, follow button, and replays.
 
 use crate::fmt;
 use crate::ui::{clear_container, App};
@@ -36,7 +36,7 @@ pub fn render(app: &Rc<App>) {
     let following = app.cfg.borrow().is_following(&channel.slug);
     let live = channel.is_live();
 
-    // --- başlık ---
+    // --- header ---
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     let titles = gtk::Box::new(gtk::Orientation::Vertical, 2);
     titles.set_hexpand(true);
@@ -85,7 +85,7 @@ pub fn render(app: &Rc<App>) {
     header.append(&follow_btn);
     container.append(&header);
 
-    // --- canlı / çevrimdışı kartı ---
+    // --- live / offline card ---
     let card = gtk::Box::new(gtk::Orientation::Vertical, 8);
     card.add_css_class("card");
     let inner = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -166,7 +166,7 @@ pub fn render(app: &Rc<App>) {
     }
     container.append(&card);
 
-    // --- yayın tekrarları ---
+    // --- replays ---
     let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     head.set_margin_top(4);
     let head_label = gtk::Label::new(Some(app.text("Yayın tekrarları", "Replays")));

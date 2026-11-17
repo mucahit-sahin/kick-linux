@@ -1,4 +1,4 @@
-//! Uygulama durumu, ana pencere ve sayfalar arası geçiş.
+//! Application state, main window, and navigation between pages.
 
 pub mod channel;
 pub mod home;
@@ -26,9 +26,9 @@ pub struct Media {
     pub kind: MediaKind,
     pub title: String,
     pub subtitle: String,
-    /// Seçilen kalite ne olursa olsun ana (master) adres.
+    /// Master URL, regardless of the selected quality.
     pub master: String,
-    /// Şu an oynatılan adres (kalite değişince farklılaşır).
+    /// Currently played URL (changes when the quality changes).
     pub url: String,
     pub duration: Option<f64>,
     pub start: f64,
@@ -100,7 +100,7 @@ impl App {
         window.set_size_request(820, 520);
         window.set_icon_name(Some("io.github.kicklite.KickLite"));
 
-        // --- üst bar ---
+        // --- top bar ---
         let header = adw::HeaderBar::new();
         let app_title = gtk::Label::new(Some("Kick Lite"));
         app_title.add_css_class("app-title");
@@ -149,12 +149,12 @@ impl App {
         header.pack_start(&home_btn);
         header.pack_end(&search);
 
-        // --- kenar çubuğu ---
+        // --- sidebar ---
         let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 4);
         sidebar.add_css_class("sidebar-panel");
         sidebar.set_width_request(238);
-        // Başlıktaki "+" düğmesi yatay genişliyor; bu, üst kutulara da
-        // yayılmasın diye kenar çubuğunun genişlemesini açıkça kapatıyoruz.
+        // The "+" button in the header expands horizontally; we explicitly disable
+        // the sidebar's horizontal expansion so it does not spread to parent boxes.
         sidebar.set_hexpand(false);
 
         let sidebar_head = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -194,7 +194,7 @@ impl App {
         sidebar.append(&side_scroll);
         sidebar.append(&sidebar_empty);
 
-        // --- sayfalar ---
+        // --- pages ---
         let stack = gtk::Stack::new();
         stack.set_hexpand(true);
         stack.set_vexpand(true);
@@ -225,8 +225,8 @@ impl App {
 
         stack.add_named(&home_scroll, Some("home"));
         stack.add_named(&channel_scroll, Some("channel"));
-        // Player kalıcı bir overlay'dir; ekran değiştirince kapanmaz, yalnızca
-        // tam boy ile mini boy arasında yeniden boyutlandırılır.
+        // The player is a persistent overlay; it does not close when switching
+        // pages, it is only resized between full and mini size.
         let player_placeholder = gtk::Box::new(gtk::Orientation::Vertical, 0);
         stack.add_named(&player_placeholder, Some("player"));
         stack.set_visible_child_name("home");
@@ -341,7 +341,7 @@ impl App {
         self.apply_language();
     }
 
-    /// Sessizlik algılama eşiklerini düzenleme penceresi.
+    /// Window for editing the silence-detection thresholds.
     fn show_silence_settings(self: &Rc<Self>) {
         let cfg = self.cfg.borrow().clone();
         let dialog = adw::PreferencesDialog::builder()
@@ -378,8 +378,9 @@ impl App {
         duration.set_digits(1);
         duration.set_value(cfg.silence_duration);
 
-        // Değer değişince ayarı kaydet ve filtreyi yeniden uygula. Spin düğmesi
-        // tutulduğunda çok sık filtre değişmemesi için kısa bir gecikme kullan.
+        // Save the setting and reapply the filter when the value changes. Use a
+        // short delay to avoid changing the filter too often while the spin button
+        // is held down.
         let pending: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
         for row in [noise.clone(), duration.clone()] {
             let a = self.clone();
@@ -401,7 +402,7 @@ impl App {
                     if let Err(err) =
                         a.player.apply_silence_filter(cfg.silence_noise_db, cfg.silence_duration)
                     {
-                        eprintln!("sessizlik filtresi uygulanamadı: {err}");
+                        eprintln!("Could not apply silence filter: {err}");
                     }
                     let _ = config::save(&cfg);
                     glib::ControlFlow::Break
@@ -459,8 +460,8 @@ impl App {
 
     pub fn present(self: &Rc<Self>) {
         self.window.present();
-        // Başlangıçta takip listesini tazele.
-        // (wire() içindeki zamanlayıcıdan bağımsız, pencere göründükten sonra.)
+        // Refresh the followed list on startup.
+        // (Independently of the timer in wire(), after the window is shown.)
         self.refresh_follows();
         self.refresh_resume_videos();
     }
@@ -468,7 +469,7 @@ impl App {
     fn wire(self: &Rc<Self>) {
         self.player_page.wire(self.clone());
 
-        // Arama
+        // Search
         {
             let a = self.clone();
             self.search.connect_activate(move |entry| {
@@ -477,7 +478,7 @@ impl App {
             });
         }
 
-        // Yenile
+        // Refresh
         {
             let a = self.clone();
             self.refresh_btn.connect_clicked(move |_| {
@@ -488,7 +489,7 @@ impl App {
             });
         }
 
-        // Sidebar "+" düğmesi
+        // Sidebar "+" button
         {
             let a = self.clone();
             self.add_btn.connect_clicked(move |_| {
@@ -496,7 +497,7 @@ impl App {
             });
         }
 
-        // Kenar çubuğu seçimi
+        // Sidebar selection
         {
             let a = self.clone();
             self.sidebar_list.connect_row_activated(move |_, row| {
@@ -507,7 +508,7 @@ impl App {
             });
         }
 
-        // Klavye kısayolları
+        // Keyboard shortcuts
         {
             let keys = gtk::EventControllerKey::new();
             keys.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -515,10 +516,9 @@ impl App {
             keys.connect_key_pressed(move |_, keyval, _code, _mods| {
                 use gtk::gdk::Key;
 
-                // GTK4'te pencerenin "focus" adında bir özelliği yoktur;
-                // property() ile sorgulamak çalışma zamanında panic üretir.
-                // Uygulamadaki tek metin girişi SearchEntry olduğundan bunu
-                // doğrudan kontrol etmek yeterlidir.
+                // In GTK4 the window has no "focus" property; querying it with property()
+                // causes a runtime panic. Since the only text input in the app is the
+                // SearchEntry, checking it directly is sufficient.
                 if a.search.has_focus() {
                     return glib::Propagation::Proceed;
                 }
@@ -586,7 +586,7 @@ impl App {
             self.window.add_controller(keys);
         }
 
-        // Tam ekran değişimi
+        // Fullscreen changes
         {
             let a = self.clone();
             self.window
@@ -603,7 +603,7 @@ impl App {
                 });
         }
 
-        // Kapanış: ayarları yaz, mpv'yi kapat
+        // Shutdown: write settings, shut down mpv
         {
             let a = self.clone();
             self.window.connect_close_request(move |_| {
@@ -611,8 +611,8 @@ impl App {
                 let cfg = a.cfg.borrow().clone();
                 let _ = config::save(&cfg);
                 a.player.shutdown();
-                // Timeout'lar App'i Rc ile tuttuğundan ana döngüyü canlı
-                // bırakabilir. Son pencere kapandığında uygulamayı da bitir.
+                // Timeouts hold the App with an Rc and can keep the main loop alive.
+                // End the application when the last window closes.
                 if let Some(app) = a.window.application() {
                     app.quit();
                 }
@@ -620,7 +620,7 @@ impl App {
             });
         }
 
-        // Oynatıcı durum döngüsü
+        // Player state loop
         {
             let a = self.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
@@ -629,7 +629,7 @@ impl App {
             });
         }
 
-        // Takip edilenlerin canlı durumunu periyodik tazele
+        // Periodically refresh the live status of followed channels
         {
             let a = self.clone();
             glib::timeout_add_seconds_local(120, move || {
@@ -641,7 +641,7 @@ impl App {
         }
     }
 
-    // ---- kenar çubuğu ----
+    // ---- sidebar ----
 
     fn rebuild_sidebar(self: &Rc<Self>) {
         while let Some(row) = self.sidebar_list.row_at_index(0) {
@@ -771,9 +771,9 @@ impl App {
         );
     }
 
-    /// Eski sürümlerde yalnızca URL ve konum saklanıyordu. Açılışta takip
-    /// edilen kanalların VOD listeleriyle eşleştirip ana sayfa için metadata
-    /// oluştururuz.
+    /// Older versions stored only the URL and position. On startup we match
+    /// them against the VOD lists of followed channels to build metadata for the
+    /// home page.
     fn refresh_resume_videos(self: &Rc<Self>) {
         let followed = self.cfg.borrow().followed.clone();
         let positions = self.cfg.borrow().resume_positions.clone();
@@ -827,12 +827,12 @@ impl App {
         );
     }
 
-    // ---- kanal ----
+    // ---- channel ----
 
     pub fn open_channel(self: &Rc<Self>, slug: String, follow: bool) {
-        // Başka bir sayfaya geçerken mevcut medya oynatmayı sürdür ve mini
-        // görüntüyü koru. Yeni bir canlı/VOD seçildiğinde play_media zaten
-        // önceki medyayı durduracaktır.
+        // When switching to another page, keep playing the current media and
+        // preserve the mini view. When a new live/VOD is selected, play_media will
+        // already stop the previous media.
         let move_to_mini = self.stack.visible_child_name().as_deref() == Some("player")
             && self.current_media.borrow().is_some();
         if self.current_media.borrow().is_none() {
@@ -944,7 +944,7 @@ impl App {
         }
     }
 
-    // ---- oynatma ----
+    // ---- playback ----
 
     pub fn play_live(self: &Rc<Self>) {
         let Some(ch) = self.current_channel.borrow().clone() else {
@@ -1141,7 +1141,7 @@ impl App {
         }
     }
 
-    /// Oynatmayı kesmeden ana sayfaya döner; varsa mini oynatıcı görünür kalır.
+    /// Returns to the home page without stopping playback; the mini player stays visible if present.
     pub fn go_home(self: &Rc<Self>) {
         if self.window.is_fullscreen() {
             self.window.unfullscreen();
@@ -1156,7 +1156,7 @@ impl App {
         home::render(self);
     }
 
-    /// Küçültülmüş oynatıcıya tıklanınca videoyu yeniden ana player alanına alır.
+    /// Moves the video back to the main player area when the mini player is clicked.
     pub fn resume_player(self: &Rc<Self>) {
         let Some(media) = self.current_media.borrow().clone() else {
             self.player_page.page.set_visible(false);
@@ -1211,7 +1211,7 @@ impl App {
         self.player_page.set_paused(self.player.is_paused());
     }
 
-    /// Canlı yayın tamponunu 2x hızda tüketerek gecikmeyi azaltır.
+    /// Reduces latency by consuming the live buffer at 2x speed.
     pub fn start_live_catch_up(&self) {
         let is_live = self
             .current_media
@@ -1278,7 +1278,7 @@ impl App {
         }
     }
 
-    // ---- arama ----
+    // ---- search ----
 
     pub fn handle_target(self: &Rc<Self>, text: &str) {
         let Some(target) = api::parse_target(text) else {
@@ -1332,12 +1332,12 @@ impl App {
         self.toast_overlay.add_toast(toast);
     }
 
-    // ---- oynatıcı döngüsü ----
+    // ---- player loop ----
 
     fn tick(self: &Rc<Self>) {
-        // mpv olaylarını her durumda boşalt (mini oynatıcı aktifken de
-        // silencedetect raporları gelmeye devam eder). Sessiz atlama hız
-        // değişimi olarak uygulandığı için burada tetiklenir.
+        // Always drain mpv events (silencedetect reports keep arriving even while
+        // the mini player is active). Since silence skipping is implemented as a
+        // speed change, it is triggered here.
         self.player.poll_events();
 
         if self.stack.visible_child_name().as_deref() != Some("player") {
@@ -1489,8 +1489,8 @@ fn setup_actions(gtk_app: &adw::Application, window: &adw::ApplicationWindow) {
             .developer_name("Kick Lite")
             .version(env!("CARGO_PKG_VERSION"))
             .comments(
-                "Hafif bir Kick.com canlı yayın ve yayın tekrarı izleyicisi.\n\
-                 Kick'in resmî olmayan herkese açık API'sini kullanır.",
+                "A lightweight Kick.com livestream and replay player.\n\
+                 Uses Kick's public, unofficial API.",
             )
             .website("https://kick.com")
             .license_type(gtk::License::MitX11)
@@ -1559,7 +1559,7 @@ pub fn live_subtitle(ch: &api::Channel) -> String {
     if !category.is_empty() {
         parts.push(category.to_string());
     }
-    parts.push(format!("{} izleyici", fmt::human_count(ch.viewers())));
+    parts.push(format!("{} viewers", fmt::human_count(ch.viewers())));
     parts.join(" · ")
 }
 

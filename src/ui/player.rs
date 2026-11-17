@@ -1,4 +1,4 @@
-//! Video sayfası: GLArea üzerinde mpv çizimi ve üzerine binen kontroller.
+//! Video page: mpv rendering on a GLArea and the overlaid controls.
 
 use crate::api;
 use crate::config;
@@ -41,7 +41,7 @@ pub struct PlayerPage {
     pub center: gtk::Box,
     pub spinner: gtk::Spinner,
     pub status_label: gtk::Label,
-    /// Kullanıcı ilerleme çubuğunu değiştirdiğinde, mpv'ye gitmeden önce bekleyen hedef.
+    /// Pending target when the user changes the progress bar, before it is sent to mpv.
     pub pending_seek: Cell<Option<f64>>,
     pub last_user_change: Cell<Option<Instant>>,
     pub hide_source: RefCell<Option<glib::SourceId>>,
@@ -55,9 +55,9 @@ impl PlayerPage {
         let area = gtk::GLArea::new();
         area.set_hexpand(true);
         area.set_vexpand(true);
-        // mpv yeni kare geldiğinde render callback'i üzerinden queue_render()
-        // çağrılır. Sürekli GTK render döngüsü CPU'yu gereksiz yere meşgul
-        // ediyordu; yalnızca gerçekten yeni kare geldiğinde çiz.
+        // When mpv has a new frame, queue_render() is called via the render callback.
+        // A continuous GTK render loop was keeping the CPU busy unnecessarily;
+        // only draw when a new frame actually arrives.
         area.set_auto_render(false);
         area.set_has_depth_buffer(false);
         area.set_has_stencil_buffer(false);
@@ -68,14 +68,14 @@ impl PlayerPage {
         page.set_vexpand(true);
         page.set_child(Some(&area));
 
-        // --- üst bar ---
+        // --- top bar ---
         let top = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         top.add_css_class("video-topbar");
         top.set_valign(gtk::Align::Start);
         top.set_can_target(true);
 
         let back = gtk::Button::from_icon_name("go-previous-symbolic");
-        back.set_tooltip_text(Some("Geri (Esc)"));
+        back.set_tooltip_text(Some("Back (Esc)"));
         back.set_has_frame(false);
         back.add_css_class("video-button");
 
@@ -94,19 +94,19 @@ impl PlayerPage {
         titles.set_hexpand(true);
         titles.set_valign(gtk::Align::Center);
 
-        let live_badge = gtk::Label::new(Some("CANLI"));
+        let live_badge = gtk::Label::new(Some("LIVE"));
         live_badge.add_css_class("live-badge");
         live_badge.set_can_target(true);
-        live_badge.set_tooltip_text(Some("Gecikmeyi azaltmak için 2x hızda oynat"));
+        live_badge.set_tooltip_text(Some("Reduce latency by playing at 2x"));
         live_badge.set_visible(false);
 
         top.append(&back);
         top.append(&titles);
         top.append(&live_badge);
 
-        // --- alt bar ---
-        // Seekbar satırın tamamına yayılır. Canlı yayında konum seekbar'ı gizli
-        // olduğundan oynat/duraklat ve aksiyonlar iki uca yaslanır.
+        // --- bottom bar ---
+        // The seek bar spans the whole row. In live streams the position seek bar
+        // is hidden, so play/pause and the actions sit at the two ends.
         let bottom = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         bottom.add_css_class("video-bottombar");
         bottom.set_valign(gtk::Align::End);
@@ -115,7 +115,7 @@ impl PlayerPage {
         bottom.set_can_target(true);
 
         let play = gtk::Button::from_icon_name("media-playback-start-symbolic");
-        play.set_tooltip_text(Some("Oynat / Duraklat (Boşluk)"));
+        play.set_tooltip_text(Some("Play / Pause (Space)"));
         play.set_has_frame(false);
         play.add_css_class("video-button");
 
@@ -129,7 +129,7 @@ impl PlayerPage {
         seek.set_hexpand(true);
         seek.set_sensitive(false);
         seek.add_css_class("video-scale");
-        seek.set_tooltip_text(Some("Yayın konumu"));
+        seek.set_tooltip_text(Some("Playback position"));
 
         let dur = gtk::Label::new(Some("0:00"));
         dur.add_css_class("video-time");
@@ -144,14 +144,14 @@ impl PlayerPage {
         seek_box.set_halign(gtk::Align::Fill);
 
         let vol_btn = gtk::Button::from_icon_name("audio-volume-high-symbolic");
-        vol_btn.set_tooltip_text(Some("Sesi aç / kapat (M)"));
+        vol_btn.set_tooltip_text(Some("Mute / unmute (M)"));
         vol_btn.set_has_frame(false);
         vol_btn.add_css_class("video-button");
 
         let volume = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
         volume.set_draw_value(false);
         volume.set_width_request(72);
-        volume.set_tooltip_text(Some("Ses düzeyi"));
+        volume.set_tooltip_text(Some("Volume"));
         volume.add_css_class("video-scale");
 
         let quality_popover = gtk::Popover::new();
@@ -163,9 +163,9 @@ impl PlayerPage {
         quality_popover.set_child(Some(&quality_box));
 
         let quality_btn = gtk::MenuButton::new();
-        quality_btn.set_label("Kalite");
+        quality_btn.set_label("Quality");
         quality_btn.set_popover(Some(&quality_popover));
-        quality_btn.set_tooltip_text(Some("Yayın kalitesi"));
+        quality_btn.set_tooltip_text(Some("Stream quality"));
         quality_btn.set_has_frame(false);
         quality_btn.add_css_class("video-button");
 
@@ -177,25 +177,25 @@ impl PlayerPage {
         speed_box.set_margin_end(6);
         speed_popover.set_child(Some(&speed_box));
         let speed_btn = gtk::MenuButton::new();
-        speed_btn.set_label("Hız");
+        speed_btn.set_label("Speed");
         speed_btn.set_popover(Some(&speed_popover));
-        speed_btn.set_tooltip_text(Some("Oynatma hızı"));
+        speed_btn.set_tooltip_text(Some("Playback speed"));
         speed_btn.set_has_frame(false);
         speed_btn.add_css_class("video-button");
 
-        let skip_silence = gtk::ToggleButton::with_label("Sessiz atla");
+        let skip_silence = gtk::ToggleButton::with_label("Skip silence");
         skip_silence.set_has_frame(false);
         skip_silence.add_css_class("video-button");
         skip_silence.add_css_class("video-toggle");
-        skip_silence.set_tooltip_text(Some("Yayın tekrarlarında sessiz kısımları atla"));
+        skip_silence.set_tooltip_text(Some("Skip silent parts in replays"));
 
         let fs = gtk::Button::from_icon_name("view-fullscreen-symbolic");
-        fs.set_tooltip_text(Some("Tam ekran (F)"));
+        fs.set_tooltip_text(Some("Fullscreen (F)"));
         fs.set_has_frame(false);
         fs.add_css_class("video-button");
 
         let mini_close = gtk::Button::from_icon_name("window-close-symbolic");
-        mini_close.set_tooltip_text(Some("Yayını / videoyu kapat"));
+        mini_close.set_tooltip_text(Some("Close stream / video"));
         mini_close.set_has_frame(false);
         mini_close.add_css_class("mini-close");
         mini_close.set_halign(gtk::Align::End);
@@ -234,14 +234,14 @@ impl PlayerPage {
         controls.set_halign(gtk::Align::Fill);
         controls.set_vexpand(true);
         controls.set_hexpand(true);
-        // Kontrol çubukları olay hedefi olabilmeli. Aradaki spacer yine olay
-        // almaz; böylece video gesture'ı boş alanda oynat/duraklat çalışır.
+        // The control bars must be able to receive events. The spacer between them
+        // still does not, so the video gesture can play/pause in the empty area.
         controls.set_can_target(true);
         controls.append(&top);
         controls.append(&spacer);
         controls.append(&bottom);
 
-        // --- ortadaki durum göstergesi ---
+        // --- central status indicator ---
         let center = gtk::Box::new(gtk::Orientation::Vertical, 10);
         center.set_halign(gtk::Align::Center);
         center.set_valign(gtk::Align::Center);
@@ -253,8 +253,8 @@ impl PlayerPage {
         center.append(&spinner);
         center.append(&status_label);
 
-        // GLArea bazı compositor/GTK durumlarında tıklama olayını alamayabiliyor.
-        // Mini player yüzeyinin tamamını kapsayan overlay, büyütme tıklamasını alır.
+        // The GLArea may not receive click events in some compositor/GTK states.
+        // An overlay covering the whole mini-player surface catches the enlarge click.
         let mini_click_area = gtk::DrawingArea::new();
         mini_click_area.set_hexpand(true);
         mini_click_area.set_vexpand(true);
@@ -306,12 +306,12 @@ impl PlayerPage {
     }
 
     pub fn wire(&self, app: Rc<App>) {
-        // GLArea yaşam döngüsü
+        // GLArea lifecycle
         {
             let a = app.clone();
             self.area.connect_realize(move |area| {
                 if !a.player.attach(area) {
-                    a.toast("Video çıkışı başlatılamadı (OpenGL)");
+                    a.toast("Could not start video output (OpenGL)");
                 } else {
                     area.queue_render();
                 }
@@ -347,7 +347,7 @@ impl PlayerPage {
             click.set_propagation_phase(gtk::PropagationPhase::Capture);
             self.mini_click_area.add_controller(click);
         }
-        // Videoya tıkla: oynat/duraklat, çift tık: tam ekran
+        // Click video: play/pause, double-click: fullscreen
         {
             let click = gtk::GestureClick::new();
             click.set_button(1);
@@ -371,7 +371,7 @@ impl PlayerPage {
             });
             self.area.add_controller(click);
         }
-        // Canlı yayında video alanında dikey tekerlek hareketiyle ses ayarla.
+        // In live streams, adjust volume with vertical scroll over the video area.
         {
             let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
             let a = app.clone();
@@ -393,7 +393,7 @@ impl PlayerPage {
             self.area.add_controller(scroll);
         }
 
-        // Fare hareketi: kontrolleri göster
+        // Mouse motion: show controls
         {
             let motion = gtk::EventControllerMotion::new();
             let a = app.clone();
@@ -411,7 +411,7 @@ impl PlayerPage {
             self.page.add_controller(motion);
         }
 
-        // Üst bar
+        // Top bar
         {
             let a = app.clone();
             self.back.connect_clicked(move |_| a.go_back());
@@ -424,7 +424,7 @@ impl PlayerPage {
             self.live_badge.add_controller(click);
         }
 
-        // Alt bar
+        // Bottom bar
         {
             let a = app.clone();
             self.play.connect_clicked(move |_| {
@@ -476,7 +476,7 @@ impl PlayerPage {
             self.mini_close.connect_clicked(move |_| a.stop_player());
         }
 
-        // Kalite menüsü açıkken kontroller gizlenmesin.
+        // Do not hide controls while the quality menu is open.
         {
             let a = app.clone();
             self.quality_popover
@@ -489,7 +489,7 @@ impl PlayerPage {
                 });
         }
 
-        // Sessiz kısımları atlama: açık/kapalı durumu ayarlarda saklanır.
+        // Silence skipping: the on/off state is stored in settings.
         {
             let initial = app.cfg.borrow().skip_silence;
             app.player.set_skip_silence(initial);
@@ -504,7 +504,7 @@ impl PlayerPage {
             });
         }
 
-        // Başlangıç ses ayarı
+        // Initial volume settings
         {
             let cfg = app.cfg.borrow().clone();
             app.player.set_volume(cfg.volume);
@@ -516,7 +516,7 @@ impl PlayerPage {
         self.set_speed_options(&app);
     }
 
-    /// Kontrolleri gösterir/gizler (yumuşak geçişle).
+    /// Shows/hides the controls (with a smooth transition).
     pub fn set_controls_visible(&self, visible: bool) {
         self.controls_visible.set(visible);
         self.controls.set_opacity(if visible { 1.0 } else { 0.0 });
@@ -563,7 +563,7 @@ impl PlayerPage {
         self.seek_box.set_visible(!live);
         self.live_controls_spacer.set_visible(live);
         self.seek.set_sensitive(!live);
-        // Sessiz atlama yalnızca yayın tekrarlarında (VOD) anlamlıdır.
+        // Silence skipping only makes sense in replays (VODs).
         self.skip_silence.set_visible(!live);
         self.pos.set_text("0:00");
         self.dur

@@ -1,4 +1,4 @@
-//! Kick.com'un herkese açık (resmî olmayan) API'siyle konuşan ince katman.
+//! Thin layer that talks to Kick.com's public (unofficial) API.
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::de::DeserializeOwned;
@@ -23,8 +23,8 @@ fn agent() -> &'static ureq::Agent {
 }
 
 fn request(url: &str) -> Result<ureq::Response> {
-    // Not: sıkıştırma isteği (accept-encoding) göndermiyoruz; Cloudflare bu
-    // başlığın küçük harfli biçimini engelliyor.
+    // Note: we do not send a compression request (accept-encoding); Cloudflare
+    // blocks the lowercase form of this header.
     match agent()
         .get(url)
         .set("Accept", "application/json, text/plain, */*")
@@ -33,18 +33,18 @@ fn request(url: &str) -> Result<ureq::Response> {
         .call()
     {
         Ok(r) => Ok(r),
-        Err(ureq::Error::Status(404, _)) => bail!("bulunamadı (404)"),
+        Err(ureq::Error::Status(404, _)) => bail!("not found (404)"),
         Err(ureq::Error::Status(429, _)) => {
-            bail!("Kick istek sınırına takıldı (429), biraz bekleyip tekrar deneyin")
+            bail!("Kick rate limit reached (429), please wait a moment and try again")
         }
-        Err(ureq::Error::Status(code, _)) => bail!("Kick API hatası (HTTP {code})"),
-        Err(ureq::Error::Transport(t)) => bail!("bağlantı hatası: {t}"),
+        Err(ureq::Error::Status(code, _)) => bail!("Kick API error (HTTP {code})"),
+        Err(ureq::Error::Transport(t)) => bail!("connection error: {t}"),
     }
 }
 
 fn get_json<T: DeserializeOwned>(url: &str) -> Result<T> {
     let text = request(url)?.into_string()?;
-    serde_json::from_str(&text).with_context(|| "Kick yanıtı çözümlenemedi")
+    serde_json::from_str(&text).with_context(|| "Could not parse Kick response")
 }
 
 fn get_text(url: &str) -> Result<String> {
@@ -101,7 +101,7 @@ pub struct Vod {
     pub session_title: Option<String>,
     #[serde(default)]
     pub created_at: Option<String>,
-    /// Milisaniye
+    /// Milliseconds
     #[serde(default)]
     pub duration: Option<u64>,
     #[serde(default)]
@@ -166,14 +166,14 @@ impl Channel {
 
 impl Vod {
     pub fn title(&self) -> &str {
-        self.session_title.as_deref().unwrap_or("(başlıksız yayın)")
+        self.session_title.as_deref().unwrap_or("(untitled stream)")
     }
 
     pub fn url(&self) -> Option<&str> {
         self.source.as_deref().filter(|u| !u.is_empty())
     }
 
-    /// Saniye cinsinden süre.
+    /// Duration in seconds.
     pub fn duration_secs(&self) -> Option<f64> {
         self.duration.map(|ms| ms as f64 / 1000.0)
     }
@@ -186,10 +186,10 @@ impl Vod {
 pub fn channel(slug: &str) -> Result<Channel> {
     let slug = slug.trim().trim_start_matches('@').to_lowercase();
     if slug.is_empty() {
-        bail!("Kanal adı boş");
+        bail!("Channel name is empty");
     }
     let url = format!("{BASE}/api/v2/channels/{slug}");
-    let mut ch: Channel = get_json(&url).with_context(|| format!("Kanal bilgisi alınamadı: {slug}"))?;
+    let mut ch: Channel = get_json(&url).with_context(|| format!("Could not get channel info: {slug}"))?;
     if ch.slug.is_empty() {
         ch.slug = slug;
     }
@@ -199,18 +199,18 @@ pub fn channel(slug: &str) -> Result<Channel> {
 pub fn vods(slug: &str) -> Result<Vec<Vod>> {
     let slug = slug.trim().trim_start_matches('@').to_lowercase();
     let url = format!("{BASE}/api/v2/channels/{slug}/videos");
-    let list: Vec<Vod> = get_json(&url).with_context(|| format!("Yayın tekrarları alınamadı: {slug}"))?;
+    let list: Vec<Vod> = get_json(&url).with_context(|| format!("Could not get replays: {slug}"))?;
     Ok(list)
 }
 
-/// Kanalın VOD listesinden tek bir tekrarı bulur (VOD bağlantısı yapıştırıldığında).
+/// Finds a single replay in the channel's VOD list (when a VOD link is pasted).
 pub fn find_vod(slug: &str, video: &str) -> Result<Vod> {
     let list = vods(slug)?;
     list.into_iter()
         .find(|v| {
             v.slug.as_deref() == Some(video) || v.id.map(|id| id.to_string()) == Some(video.to_string())
         })
-        .ok_or_else(|| anyhow!("Yayın tekrarı bulunamadı (kanal VOD'ları kapatmış olabilir)"))
+        .ok_or_else(|| anyhow!("Replay not found (the channel may have disabled VODs)"))
 }
 
 #[derive(Clone, Debug)]
@@ -228,15 +228,15 @@ impl Variant {
         } else if self.bandwidth > 0 {
             format!("{} kbps", self.bandwidth / 1000)
         } else {
-            "Kaynak".to_string()
+            "Source".to_string()
         }
     }
 }
 
-/// HLS master listesinden kalite varyantlarını çıkarır.
-/// Tek varyantlı (media) listelerde boş döner; o zaman mpv kendi seçer.
+/// Extracts quality variants from the HLS master list.
+/// Returns an empty list for single-variant (media) lists; mpv then picks on its own.
 pub fn hls_variants(master_url: &str) -> Result<Vec<Variant>> {
-    let text = get_text(master_url).context("Yayın kaliteleri alınamadı")?;
+    let text = get_text(master_url).context("Could not get stream qualities")?;
     let mut out: Vec<Variant> = Vec::new();
     let mut pending: Option<(u32, u32, u64)> = None;
 
@@ -298,7 +298,7 @@ pub enum Target {
     Vod { channel: String, video: String },
 }
 
-/// Kullanıcının yazdığı kanal adını veya Kick bağlantısını çözümler.
+/// Resolves a channel name or Kick link entered by the user.
 pub fn parse_target(input: &str) -> Option<Target> {
     let raw = input.trim();
     if raw.is_empty() {

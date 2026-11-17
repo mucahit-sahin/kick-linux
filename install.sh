@@ -5,7 +5,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 prefix="${HOME}/.local"
 
 if [[ ! -x "${root}/target/release/kick-lite" ]]; then
-    echo "Release ikilisi bulunamadı; cargo build --release çalıştırılıyor..."
+    echo "Release binary not found; running cargo build --release..."
     (cd "${root}" && cargo build --release)
 fi
 
@@ -19,4 +19,4 @@ if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "${prefix}/share/applications" >/dev/null 2>&1 || true
 fi
 
-echo "Kick Lite kuruldu: ${prefix}/bin/kick-lite"
+echo "Kick Lite installed: ${prefix}/bin/kick-lite"
