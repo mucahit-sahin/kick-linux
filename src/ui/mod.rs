@@ -356,35 +356,57 @@ impl App {
             ))
             .build();
 
+        // AdwSpinRow varsayılan adjustment'ında step-increment 0 olduğundan
+        // +/− düğmeleri çalışmaz. Adım ve sayfa artışını açıkça tanımlıyoruz.
+        let noise_adjustment = gtk::Adjustment::new(
+            cfg.silence_noise_db as f64,
+            -80.0,
+            0.0,
+            1.0,   // step increment
+            10.0,  // page increment
+            0.0,
+        );
         let noise = adw::SpinRow::builder()
+            .adjustment(&noise_adjustment)
             .title(self.text("Ses eşiği (dB)", "Noise threshold (dB)"))
             .subtitle(self.text(
                 "Altındaki ses düzeyleri sessiz sayılır",
                 "Audio levels below this are treated as silence",
             ))
             .build();
-        noise.set_range(-80.0, 0.0);
         noise.set_digits(0);
-        noise.set_value(cfg.silence_noise_db as f64);
+        noise.set_climb_rate(1.0);
+        noise.set_numeric(true);
 
+        let duration_adjustment = gtk::Adjustment::new(
+            cfg.silence_duration,
+            0.1,
+            10.0,
+            0.1,  // step increment
+            1.0,  // page increment
+            0.0,
+        );
         let duration = adw::SpinRow::builder()
+            .adjustment(&duration_adjustment)
             .title(self.text("En kısa sessizlik (sn)", "Minimum silence (s)"))
             .subtitle(self.text(
                 "Bu süreden kısa boşluklar atlanmaz",
                 "Gaps shorter than this are ignored",
             ))
             .build();
-        duration.set_range(0.1, 10.0);
         duration.set_digits(1);
-        duration.set_value(cfg.silence_duration);
+        duration.set_climb_rate(0.1);
+        duration.set_numeric(true);
 
         // Save the setting and reapply the filter when the value changes. Use a
         // short delay to avoid changing the filter too often while the spin button
-        // is held down.
-        let pending: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+        // is held down. A generation counter keeps only the newest change; calling
+        // SourceId::remove() on an already-fired timeout panics, so the old
+        // timeout is simply left to expire and skips its work.
+        let generation = Rc::new(Cell::new(0u64));
         for row in [noise.clone(), duration.clone()] {
             let a = self.clone();
-            let pending = pending.clone();
+            let generation = generation.clone();
             let noise = noise.clone();
             let duration = duration.clone();
             row.connect_value_notify(move |_| {
@@ -393,21 +415,23 @@ impl App {
                     cfg.silence_noise_db = noise.value().round() as i32;
                     cfg.silence_duration = duration.value();
                 }
-                if let Some(id) = pending.borrow_mut().take() {
-                    id.remove();
-                }
+                generation.set(generation.get() + 1);
+                let my_generation = generation.get();
                 let a = a.clone();
-                let id = glib::timeout_add_local(std::time::Duration::from_millis(350), move || {
-                    let cfg = a.cfg.borrow().clone();
-                    if let Err(err) =
-                        a.player.apply_silence_filter(cfg.silence_noise_db, cfg.silence_duration)
-                    {
-                        eprintln!("Could not apply silence filter: {err}");
+                let generation = generation.clone();
+                glib::timeout_add_local(std::time::Duration::from_millis(350), move || {
+                    if generation.get() == my_generation {
+                        let cfg = a.cfg.borrow().clone();
+                        if let Err(err) = a.player.apply_silence_filter(
+                            cfg.silence_noise_db,
+                            cfg.silence_duration,
+                        ) {
+                            eprintln!("Could not apply silence filter: {err}");
+                        }
+                        let _ = config::save(&cfg);
                     }
-                    let _ = config::save(&cfg);
                     glib::ControlFlow::Break
                 });
-                pending.replace(Some(id));
             });
         }
 
