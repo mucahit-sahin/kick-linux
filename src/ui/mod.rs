@@ -1,6 +1,7 @@
 //! Application state, main window, and navigation between pages.
 
 pub mod channel;
+pub mod downloads;
 pub mod home;
 pub mod player;
 
@@ -73,6 +74,7 @@ pub struct App {
     pub sidebar_empty: gtk::Label,
     pub search: gtk::SearchEntry,
     pub refresh_btn: gtk::Button,
+    pub downloads_btn: gtk::Button,
     pub add_btn: gtk::Button,
     menu_btn: gtk::MenuButton,
     pub stack: gtk::Stack,
@@ -80,6 +82,8 @@ pub struct App {
     pub home_scroll: gtk::ScrolledWindow,
     pub channel_box: gtk::Box,
     pub channel_scroll: gtk::ScrolledWindow,
+    pub downloads_box: gtk::Box,
+    pub downloads_scroll: gtk::ScrolledWindow,
     pub player_page: player::PlayerPage,
     pub player: mpv::Player,
     pub language: RefCell<String>,
@@ -180,6 +184,10 @@ impl App {
         refresh_btn.set_tooltip_text(Some("Refresh followed channels"));
         refresh_btn.set_has_frame(false);
 
+        let downloads_btn = gtk::Button::from_icon_name("folder-download-symbolic");
+        downloads_btn.set_tooltip_text(Some("Downloads"));
+        downloads_btn.set_has_frame(false);
+
         let home_btn = gtk::Button::from_icon_name("go-home-symbolic");
         home_btn.set_tooltip_text(Some("Go to home"));
         home_btn.set_has_frame(false);
@@ -215,6 +223,7 @@ impl App {
         header.pack_end(&menu_btn);
         header.pack_end(&refresh_btn);
         header.pack_end(&download_indicator);
+        header.pack_end(&downloads_btn);
         header.pack_start(&home_btn);
         header.pack_end(&search);
 
@@ -290,10 +299,21 @@ impl App {
         channel_scroll.set_child(Some(&channel_box));
         channel_scroll.set_vexpand(true);
 
+        let downloads_box = gtk::Box::new(gtk::Orientation::Vertical, 18);
+        downloads_box.set_margin_top(28);
+        downloads_box.set_margin_bottom(28);
+        downloads_box.set_margin_start(30);
+        downloads_box.set_margin_end(30);
+        let downloads_scroll = gtk::ScrolledWindow::new();
+        downloads_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        downloads_scroll.set_child(Some(&downloads_box));
+        downloads_scroll.set_vexpand(true);
+
         let player_page = player::PlayerPage::new();
 
         stack.add_named(&home_scroll, Some("home"));
         stack.add_named(&channel_scroll, Some("channel"));
+        stack.add_named(&downloads_scroll, Some("downloads"));
         // The player is a persistent overlay; it does not close when switching
         // pages, it is only resized between full and mini size.
         let player_placeholder = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -337,6 +357,7 @@ impl App {
             sidebar_empty,
             search,
             refresh_btn,
+            downloads_btn: downloads_btn.clone(),
             add_btn,
             menu_btn,
             stack,
@@ -344,6 +365,8 @@ impl App {
             home_scroll,
             channel_box,
             channel_scroll,
+            downloads_box,
+            downloads_scroll,
             player_page,
             player,
             language: RefCell::new(language),
@@ -377,7 +400,11 @@ impl App {
         }
         {
             let a = app.clone();
-            download_indicator.connect_clicked(move |_| a.go_home());
+            download_indicator.connect_clicked(move |_| a.go_downloads());
+        }
+        {
+            let a = app.clone();
+            downloads_btn.connect_clicked(move |_| a.go_downloads());
         }
 
         app.clone().wire();
@@ -565,8 +592,10 @@ impl App {
             "Henüz kanal takip etmiyorsun.\nÜstteki arama alanına bir kanal adı yaz."
         });
         self.player_page.set_language(en);
+        self.downloads_btn.set_tooltip_text(Some(if en { "Downloads" } else { "İndirilenler" }));
         self.rebuild_sidebar();
         home::render(self);
+        downloads::render(self);
         if self.current_channel.borrow().is_some() {
             channel::render(self);
         }
@@ -1196,8 +1225,8 @@ impl App {
             },
         );
         self.update_download_indicator();
-        if self.stack.visible_child_name().as_deref() == Some("home") {
-            home::render(self);
+        if self.stack.visible_child_name().as_deref() == Some("downloads") {
+            downloads::render(self);
         }
 
         let a = self.clone();
@@ -1213,8 +1242,8 @@ impl App {
                             active.bytes = bytes;
                         }
                         a.update_download_indicator();
-                        if a.stack.visible_child_name().as_deref() == Some("home") {
-                            home::render(&a);
+                        if a.stack.visible_child_name().as_deref() == Some("downloads") {
+                            downloads::render(&a);
                         }
                     }
                     download::Event::Finished(result) => {
@@ -1238,8 +1267,8 @@ impl App {
                                 ));
                             }
                         }
-                        if a.stack.visible_child_name().as_deref() == Some("home") {
-                            home::render(&a);
+                        if a.stack.visible_child_name().as_deref() == Some("downloads") {
+                            downloads::render(&a);
                         }
                         break;
                     }
@@ -1309,7 +1338,7 @@ impl App {
             start: item.position,
             download_id: Some(item.id.clone()),
         };
-        self.play_media(media, "home");
+        self.play_media(media, "downloads");
     }
 
     pub fn delete_download(self: &Rc<Self>, id: &str) {
@@ -1334,7 +1363,7 @@ impl App {
                 return;
             }
         }
-        home::render(&self);
+        downloads::render(&self);
     }
 
     // ---- playback ----
@@ -1538,8 +1567,10 @@ impl App {
         }
         self.home_scroll.vadjustment().set_value(0.0);
         self.channel_scroll.vadjustment().set_value(0.0);
+        self.downloads_scroll.vadjustment().set_value(0.0);
         match page {
             "channel" if self.current_channel.borrow().is_some() => channel::render(self),
+            "downloads" => downloads::render(self),
             _ => home::render(self),
         }
     }
@@ -1557,6 +1588,21 @@ impl App {
             self.show_mini_player();
         }
         home::render(self);
+    }
+
+    /// Opens the dedicated downloads page without stopping playback.
+    pub fn go_downloads(self: &Rc<Self>) {
+        if self.window.is_fullscreen() {
+            self.window.unfullscreen();
+        }
+        self.return_page.set("downloads");
+        self.stack.set_visible_child_name("downloads");
+        self.downloads_scroll.vadjustment().set_value(0.0);
+        self.cancel_hide_controls();
+        if self.current_media.borrow().is_some() {
+            self.show_mini_player();
+        }
+        downloads::render(self);
     }
 
     /// Moves the video back to the main player area when the mini player is clicked.
