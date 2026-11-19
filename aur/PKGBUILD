@@ -1,0 +1,27 @@
+# Maintainer: Mücahit Şahin <mucahitsahin786@gmail.com>
+pkgname=kick-lite
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='A lightweight Kick.com livestream and replay player'
+arch=('x86_64')
+url='https://github.com/mucahit-sahin/kick-linux'
+license=('MIT')
+depends=('gtk4' 'libadwaita' 'mpv' 'hicolor-icon-theme')
+makedepends=('rust' 'cargo' 'pkgconf')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('4eb0f682d2e2f8ad107d73b214ac78fb26b117589c842d95df5a8a3ce93900e2')
+
+build() {
+  cd "$srcdir/kick-linux-$pkgver"
+  cargo build --release --locked
+}
+
+package() {
+  cd "$srcdir/kick-linux-$pkgver"
+  install -Dm755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+  install -Dm644 io.github.kicklite.KickLite.desktop \
+    "$pkgdir/usr/share/applications/io.github.kicklite.KickLite.desktop"
+  install -Dm644 io.github.kicklite.KickLite.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.github.kicklite.KickLite.svg"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
