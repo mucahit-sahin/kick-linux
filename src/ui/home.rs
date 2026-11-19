@@ -64,15 +64,10 @@ pub fn render(app: &Rc<App>) {
     flow.set_valign(gtk::Align::Start);
     flow.set_margin_top(6);
 
-    let mut visible_channels: Vec<_> = followed.iter().collect();
-    visible_channels.sort_by_key(|followed_channel| {
-        !app.status
-            .borrow()
-            .get(&followed_channel.slug)
-            .is_some_and(|channel| channel.is_live())
-    });
+    // Same order as the sidebar: live channels first by viewer count, then offline.
+    let visible_channels = app.sorted_followed();
 
-    for followed_channel in visible_channels {
+    for followed_channel in &visible_channels {
         let status = app.status.borrow().get(&followed_channel.slug).cloned();
         flow.insert(&card(app, followed_channel, status.as_ref()), -1);
     }
