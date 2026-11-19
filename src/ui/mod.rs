@@ -1032,11 +1032,51 @@ impl App {
 
     // ---- sidebar ----
 
+    /// Followed channels ordered for display: live channels first (highest viewer
+    /// count first), then offline channels alphabetically by name.
+    fn sorted_followed(&self) -> Vec<config::Followed> {
+        let cfg = self.cfg.borrow();
+        let status = self.status.borrow();
+        let mut followed = cfg.followed.clone();
+        followed.sort_by(|a, b| {
+            let ca = status.get(&a.slug);
+            let cb = status.get(&b.slug);
+            let la = ca.is_some_and(|c| c.is_live());
+            let lb = cb.is_some_and(|c| c.is_live());
+            match (la, lb) {
+                (true, true) => {
+                    let va = ca.map(|c| c.viewers()).unwrap_or(0);
+                    let vb = cb.map(|c| c.viewers()).unwrap_or(0);
+                    vb.cmp(&va).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                }
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                (false, false) => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            }
+        });
+        followed
+    }
+
+    /// Reorder the existing sidebar rows to match [`Self::sorted_followed`]
+    /// without recreating their widgets (keeps focus and selection intact).
+    fn reorder_sidebar(self: &Rc<Self>) {
+        let slugs: Vec<String> = self.sorted_followed().into_iter().map(|f| f.slug).collect();
+        let views = self.follow_views.borrow();
+        for v in views.values() {
+            self.sidebar_list.remove(&v._row);
+        }
+        for (index, slug) in slugs.iter().enumerate() {
+            if let Some(v) = views.get(slug) {
+                self.sidebar_list.insert(&v._row, index as i32);
+            }
+        }
+    }
+
     fn rebuild_sidebar(self: &Rc<Self>) {
         while let Some(row) = self.sidebar_list.row_at_index(0) {
             self.sidebar_list.remove(&row);
         }
-        let followed = self.cfg.borrow().followed.clone();
+        let followed = self.sorted_followed();
         {
             let mut views = self.follow_views.borrow_mut();
             views.clear();
@@ -1153,6 +1193,7 @@ impl App {
                     a.status.borrow_mut().insert(ch.slug.clone(), ch.clone());
                     a.update_sidebar_row(&ch);
                 }
+                a.reorder_sidebar();
                 a.refreshing.set(false);
                 a.update_sidebar_title();
                 home::render(&a);
@@ -1269,6 +1310,7 @@ impl App {
                         }
                         a.status.borrow_mut().insert(ch.slug.clone(), ch.clone());
                         a.update_sidebar_row(&ch);
+                        a.reorder_sidebar();
                         a.update_sidebar_title();
                         a.current_channel.replace(Some(ch));
                         match videos {
