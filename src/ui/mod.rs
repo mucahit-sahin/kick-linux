@@ -1767,7 +1767,12 @@ impl App {
     // ---- multi-view ----
 
     /// Adds a live channel to the mini players without interrupting playback.
+    /// The player screen is opened immediately; the new stream appears there
+    /// as a mini tile while the current one keeps the full view.
     pub fn open_live_multi(self: &Rc<Self>, slug: String) {
+        if self.current_media.borrow().is_some() {
+            self.resume_player();
+        }
         let a = self.clone();
         spawn_task(
             move || api::channel(&slug),

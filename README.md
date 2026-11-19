@@ -69,8 +69,9 @@ The application uses Kick's public, unofficial API endpoints. If Kick's API or C
 
 To add a stream to multi-view, use the **+** button on a live channel card on the
 home page, or **Open in mini player** on a channel page. These controls appear
-only while at least one stream is already playing. Click a mini player to make
-it the focused stream.
+only while at least one stream is already playing. Clicking one opens the
+player screen: the current stream stays in the main view and the new one
+appears as a mini tile. Click a mini player to make it the focused stream.
 
 ## Installation
 
