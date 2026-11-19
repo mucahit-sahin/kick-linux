@@ -553,6 +553,156 @@ impl App {
         group.add(&duration);
         group.add(&reset);
         page.add(&group);
+
+        // Live level meter: a scrolling dB history with the silence threshold
+        // drawn on top, so the user can see at which level silence is detected.
+        const METER_MIN_DB: f64 = -80.0;
+        const METER_MAX_DB: f64 = 0.0;
+        const METER_SAMPLES: usize = 120;
+
+        let meter_group = adw::PreferencesGroup::builder()
+            .title(self.text("Anlık ses seviyesi", "Live audio level"))
+            .description(self.text(
+                "Turuncu çizgi sessizlik eşiğini gösterir; eşiği bu grafiğe göre ayarla.",
+                "The orange line marks the silence threshold; adjust it using this graph.",
+            ))
+            .build();
+
+        let meter_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        meter_box.set_margin_top(6);
+        meter_box.set_margin_bottom(6);
+
+        let now_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let now_caption = gtk::Label::new(Some(self.text("Şu an:", "Now:")));
+        now_caption.add_css_class("dim-label");
+        let level_label = gtk::Label::new(Some("—"));
+        level_label.add_css_class("title-2");
+        level_label.set_xalign(0.0);
+        let state_label = gtk::Label::new(None);
+        state_label.add_css_class("dim-label");
+        now_row.append(&now_caption);
+        now_row.append(&level_label);
+        now_row.append(&state_label);
+        meter_box.append(&now_row);
+
+        let samples = Rc::new(RefCell::new(vec![METER_MIN_DB; METER_SAMPLES]));
+        let meter = gtk::DrawingArea::new();
+        meter.set_height_request(110);
+        meter.set_hexpand(true);
+        {
+            let samples = samples.clone();
+            let a = self.clone();
+            meter.set_draw_func(move |widget, cr, w, h| {
+                let fg = widget.color();
+                let (fr, fgc, fb) = (fg.red() as f64, fg.green() as f64, fg.blue() as f64);
+                let to_y = |db: f64| {
+                    let db = if db.is_finite() {
+                        db.clamp(METER_MIN_DB, METER_MAX_DB)
+                    } else {
+                        METER_MIN_DB
+                    };
+                    h as f64 - (db - METER_MIN_DB) / (METER_MAX_DB - METER_MIN_DB) * h as f64
+                };
+
+                cr.set_source_rgba(fr, fgc, fb, 0.06);
+                cr.rectangle(0.0, 0.0, w as f64, h as f64);
+                let _ = cr.fill();
+
+                // dB grid
+                cr.set_font_size(9.0);
+                for db in [0.0_f64, -20.0, -40.0, -60.0, -80.0] {
+                    let y = to_y(db);
+                    cr.set_source_rgba(fr, fgc, fb, 0.14);
+                    cr.set_line_width(1.0);
+                    cr.move_to(0.0, y);
+                    cr.line_to(w as f64, y);
+                    let _ = cr.stroke();
+                    cr.set_source_rgba(fr, fgc, fb, 0.55);
+                    cr.move_to(4.0, (y - 3.0).max(10.0));
+                    let _ = cr.show_text(&format!("{db:.0}"));
+                }
+
+                let threshold = a.cfg.borrow().silence_noise_db as f64;
+                let ty = to_y(threshold);
+
+                // Region below the threshold is treated as silence.
+                cr.set_source_rgba(0.90, 0.25, 0.30, 0.13);
+                cr.rectangle(0.0, ty, w as f64, h as f64 - ty);
+                let _ = cr.fill();
+
+                // Filled waveform of recent levels.
+                let history = samples.borrow();
+                let step = w as f64 / (history.len() - 1) as f64;
+                cr.move_to(0.0, h as f64);
+                for (i, db) in history.iter().enumerate() {
+                    cr.line_to(i as f64 * step, to_y(*db));
+                }
+                cr.line_to(w as f64, h as f64);
+                cr.close_path();
+                cr.set_source_rgba(0.15, 0.72, 0.45, 0.28);
+                let _ = cr.fill();
+
+                cr.move_to(0.0, to_y(history[0]));
+                for (i, db) in history.iter().enumerate() {
+                    cr.line_to(i as f64 * step, to_y(*db));
+                }
+                cr.set_source_rgba(0.15, 0.72, 0.45, 0.95);
+                cr.set_line_width(1.5);
+                let _ = cr.stroke();
+
+                let _ = cr.set_dash(&[4.0, 3.0], 0.0);
+                cr.set_source_rgba(0.95, 0.60, 0.15, 0.95);
+                cr.set_line_width(1.5);
+                cr.move_to(0.0, ty);
+                cr.line_to(w as f64, ty);
+                let _ = cr.stroke();
+                let _ = cr.set_dash(&[], 0.0);
+            });
+        }
+        meter_box.append(&meter);
+        meter_group.add(&meter_box);
+        page.add(&meter_group);
+
+        // Poll the level while the dialog is open; the timeout is removed on close.
+        let meter_timer = Rc::new(Cell::new(None::<glib::SourceId>));
+        dialog.connect_closed({
+            let timer = meter_timer.clone();
+            move |_| {
+                if let Some(id) = timer.take() {
+                    id.remove();
+                }
+            }
+        });
+        {
+            let a = self.clone();
+            let history = samples.clone();
+            let level_label = level_label.clone();
+            let state_label = state_label.clone();
+            let meter = meter.clone();
+            let id = glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                let db = a.player.audio_level_db();
+                {
+                    let mut history = history.borrow_mut();
+                    history.pop();
+                    history.insert(0, db.unwrap_or(f64::NEG_INFINITY));
+                }
+                let silent = db.is_some_and(|v| v < a.cfg.borrow().silence_noise_db as f64);
+                level_label.set_text(&match db {
+                    Some(v) if v.is_finite() => format!("{v:.1} dB"),
+                    Some(_) => "-∞ dB".to_string(),
+                    None => "—".to_string(),
+                });
+                state_label.set_text(if db.is_some() && silent {
+                    a.text("· sessiz", "· silent")
+                } else {
+                    ""
+                });
+                meter.queue_draw();
+                glib::ControlFlow::Continue
+            });
+            meter_timer.set(Some(id));
+        }
+
         dialog.add(&page);
         dialog.present(Some(&self.window));
     }

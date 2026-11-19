@@ -35,6 +35,8 @@ pub struct PlayerPage {
     pub speed_popover: gtk::Popover,
     pub speed_box: gtk::Box,
     pub skip_silence: gtk::ToggleButton,
+    /// Opens the silence-detection settings (threshold and live level meter).
+    pub silence_btn: gtk::Button,
     pub fs: gtk::Button,
     pub mini_close: gtk::Button,
     pub mini_click_area: gtk::DrawingArea,
@@ -189,6 +191,11 @@ impl PlayerPage {
         skip_silence.add_css_class("video-toggle");
         skip_silence.set_tooltip_text(Some("Skip silent parts in replays"));
 
+        let silence_btn = gtk::Button::from_icon_name("preferences-system-symbolic");
+        silence_btn.set_tooltip_text(Some("Silence settings"));
+        silence_btn.set_has_frame(false);
+        silence_btn.add_css_class("video-button");
+
         let fs = gtk::Button::from_icon_name("view-fullscreen-symbolic");
         fs.set_tooltip_text(Some("Fullscreen (F)"));
         fs.set_has_frame(false);
@@ -208,6 +215,7 @@ impl PlayerPage {
         actions.append(&vol_btn);
         actions.append(&volume);
         actions.append(&skip_silence);
+        actions.append(&silence_btn);
         actions.append(&speed_btn);
         actions.append(&quality_btn);
         actions.append(&fs);
@@ -290,6 +298,7 @@ impl PlayerPage {
             speed_popover,
             speed_box,
             skip_silence,
+            silence_btn,
             fs,
             mini_close,
             mini_click_area,
@@ -504,6 +513,13 @@ impl PlayerPage {
             });
         }
 
+        // The settings button reuses the same dialog as the app menu, but can be
+        // reached directly while watching a replay.
+        {
+            let a = app.clone();
+            self.silence_btn.connect_clicked(move |_| a.show_silence_settings());
+        }
+
         // Initial volume settings
         {
             let cfg = app.cfg.borrow().clone();
@@ -537,6 +553,7 @@ impl PlayerPage {
         self.speed_btn.set_tooltip_text(Some(if english { "Playback speed" } else { "Oynatma hızı" }));
         self.skip_silence.set_label(if english { "Skip silence" } else { "Sessiz atla" });
         self.skip_silence.set_tooltip_text(Some(if english { "Skip silent parts in replays" } else { "Yayın tekrarlarında sessiz kısımları atla" }));
+        self.silence_btn.set_tooltip_text(Some(if english { "Silence settings" } else { "Sessizlik ayarları" }));
         self.fs.set_tooltip_text(Some(if english { "Fullscreen (F)" } else { "Tam ekran (F)" }));
         self.mini_close.set_tooltip_text(Some(if english { "Close stream / video" } else { "Yayını / videoyu kapat" }));
         self.quality_btn.set_label(if english { "Quality" } else { "Kalite" });
@@ -565,6 +582,7 @@ impl PlayerPage {
         self.seek.set_sensitive(!live);
         // Silence skipping only makes sense in replays (VODs).
         self.skip_silence.set_visible(!live);
+        self.silence_btn.set_visible(!live);
         self.pos.set_text("0:00");
         self.dur
             .set_text(&media.duration.map(fmt::duration).unwrap_or_default());

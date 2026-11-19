@@ -53,6 +53,12 @@ const SKIP_SPEED: f64 = 10.0;
 const SILENCE_POS_TOLERANCE: f64 = 2.5;
 /// Maximum number of events processed in one call (to avoid clogging the queue).
 const MAX_EVENTS_PER_POLL: usize = 256;
+/// Label of the `astats` filter that measures the current audio level. It is
+/// exposed by mpv under `af-metadata/<label>/...` and is read to draw the live
+/// level meter in the silence settings. `reset=1` keeps the statistics scoped
+/// to a single frame, so the reported value follows the audio in real time.
+const LEVEL_FILTER: &str = "@level:lavfi=[astats=metadata=1:reset=1]";
+const LEVEL_PROPERTY: &str = "af-metadata/level/lavfi.astats.Overall.RMS_level";
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -112,6 +118,8 @@ extern "C" {
         format: c_int,
         data: *mut c_void,
     ) -> c_int;
+    fn mpv_get_property_string(ctx: *mut mpv_handle, name: *const c_char) -> *mut c_char;
+    fn mpv_free(data: *mut c_void);
     fn mpv_command(ctx: *mut mpv_handle, args: *const *const c_char) -> c_int;
     fn mpv_wait_event(ctx: *mut mpv_handle, timeout: c_double) -> *mut mpv_event;
     fn mpv_request_log_messages(ctx: *mut mpv_handle, min_level: *const c_char) -> c_int;
@@ -444,6 +452,24 @@ impl Player {
 
     // ---- skipping silent parts ----
 
+    /// Current RMS audio level in dBFS, or `None` while no audio is playing.
+    /// Digital silence is reported as negative infinity.
+    pub fn audio_level_db(&self) -> Option<f64> {
+        let name = CString::new(LEVEL_PROPERTY).ok()?;
+        let ptr = unsafe { mpv_get_property_string(self.handle, name.as_ptr()) };
+        if ptr.is_null() {
+            return None;
+        }
+        let text = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned();
+        unsafe { mpv_free(ptr as *mut c_void) };
+        let value = text.trim();
+        if value == "-inf" {
+            Some(f64::NEG_INFINITY)
+        } else {
+            value.parse().ok()
+        }
+    }
+
     /// Turns the feature on/off. When disabled, any sped-up playback returns
     /// to the previous speed.
     pub fn set_skip_silence(&self, enabled: bool) {
@@ -457,7 +483,7 @@ impl Player {
     /// the audio chain; playback continues.
     pub fn apply_silence_filter(&self, noise_db: i32, duration: f64) -> Result<()> {
         self.end_silence_skip();
-        self.command(&["af", "set", &silence_filter(noise_db, duration)])
+        self.command(&["af", "set", &audio_filters(noise_db, duration)])
     }
 
     /// No skipping in live streams; only allowed in VODs.
@@ -631,9 +657,12 @@ fn number_after(text: &str, key: &str) -> Option<f64> {
     rest[..len].parse().ok()
 }
 
-/// Builds the `silencedetect` filter chain from user settings.
-fn silence_filter(noise_db: i32, duration: f64) -> String {
-    format!("lavfi=[silencedetect=noise={noise_db}dB:d={duration:.2}]")
+/// Builds the audio filter chain: `silencedetect` drives the skipping and
+/// `astats` (with a stable label) feeds the live level meter in the settings.
+fn audio_filters(noise_db: i32, duration: f64) -> String {
+    format!(
+        "{LEVEL_FILTER},lavfi=[silencedetect=noise={noise_db}dB:d={duration:.2}]"
+    )
 }
 
 fn options(noise_db: i32, duration: f64) -> Vec<(&'static str, String)> {
@@ -662,7 +691,7 @@ fn options(noise_db: i32, duration: f64) -> Vec<(&'static str, String)> {
         // Silence detection is always enabled; the skipping behavior is toggled by
         // the `skip_silence` flag. This way the filter is not restarted at startup,
         // and position/timestamps do not drift.
-        ("af", silence_filter(noise_db, duration)),
+        ("af", audio_filters(noise_db, duration)),
         ("msg-level", "ffmpeg=v".into()),
     ]
 }
