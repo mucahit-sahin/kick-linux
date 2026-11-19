@@ -192,6 +192,7 @@ fn card(
         badge.add_css_class("live-badge");
         name_row.append(&badge);
         let add_mini = gtk::Button::from_icon_name("list-add-symbolic");
+        add_mini.set_visible(app.has_active_stream());
         add_mini.set_has_frame(false);
         add_mini.add_css_class("flat");
         add_mini.set_tooltip_text(Some(app.text(

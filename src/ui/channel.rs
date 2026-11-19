@@ -146,6 +146,8 @@ pub fn render(app: &Rc<App>) {
             "Open in mini player",
         ));
         watch_mini.set_halign(gtk::Align::Start);
+        // Only useful when there is already a stream to watch alongside.
+        watch_mini.set_visible(app.has_active_stream());
         {
             let a = app.clone();
             watch_mini.connect_clicked(move |_| a.play_live_multi());

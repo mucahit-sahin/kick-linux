@@ -465,6 +465,22 @@ impl App {
         self.player_page.borrow().clone()
     }
 
+    /// Whether at least one stream (full or mini) is currently playing.
+    pub fn has_active_stream(&self) -> bool {
+        self.current_media.borrow().is_some() || !self.mini_players.borrow().is_empty()
+    }
+
+    /// Rebuilds the visible page so controls that depend on an active stream
+    /// (e.g. "open in mini player") appear or disappear immediately.
+    fn refresh_stream_actions(self: &Rc<Self>) {
+        match self.stack.visible_child_name().as_deref() {
+            Some("player") | None => {}
+            Some("channel") => channel::render(self),
+            Some("downloads") => downloads::render(self),
+            _ => home::render(self),
+        }
+    }
+
     pub fn is_english(&self) -> bool {
         self.language.borrow().as_str() == "en"
     }
@@ -982,7 +998,7 @@ impl App {
                 a.save_current_position();
                 let cfg = a.cfg.borrow().clone();
                 let _ = config::save(&cfg);
-                a.close_all_multi();
+                a.drain_minis();
                 a.player.shutdown();
                 // Timeouts hold the App with an Rc and can keep the main loop alive.
                 // End the application when the last window closes.
@@ -1745,6 +1761,7 @@ impl App {
             self.page().quality_btn.set_sensitive(false);
             self.page().set_variants(self, Vec::new());
         }
+        self.refresh_stream_actions();
     }
 
     // ---- multi-view ----
@@ -1837,6 +1854,7 @@ impl App {
         page.page
             .insert_before(&self.stack_overlay, None::<&gtk::Widget>);
         self.mini_players.borrow_mut().push(mini);
+        self.refresh_stream_actions();
     }
 
     fn close_mini(&self, mini: &multi::MiniPlayer) {
@@ -1846,7 +1864,7 @@ impl App {
         mini.player.borrow().shutdown();
     }
 
-    pub fn close_multi(&self, id: u64) {
+    pub fn close_multi(self: &Rc<Self>, id: u64) {
         let removed = {
             let mut minis = self.mini_players.borrow_mut();
             minis
@@ -1857,6 +1875,7 @@ impl App {
         if let Some(mini) = removed {
             self.close_mini(&mini);
             self.reindex_minis();
+            self.refresh_stream_actions();
         }
     }
 
@@ -1878,10 +1897,15 @@ impl App {
     }
 
     /// Shuts down every extra player (used by the menu action and on exit).
-    pub fn close_all_multi(&self) {
+    fn drain_minis(&self) {
         for mini in self.mini_players.borrow_mut().drain(..) {
             self.close_mini(&mini);
         }
+    }
+
+    pub fn close_all_multi(self: &Rc<Self>) {
+        self.drain_minis();
+        self.refresh_stream_actions();
     }
 
     // Layout is only a matter of size/alignment: the GLArea and its mpv render
@@ -2071,7 +2095,7 @@ impl App {
         self.poke_controls();
     }
 
-    pub fn stop_player(&self) {
+    pub fn stop_player(self: &Rc<Self>) {
         self.save_current_position();
         self.reset_auto_silence();
         self.player.set_silence_allowed(false);
@@ -2087,6 +2111,7 @@ impl App {
         self.page().set_controls_visible(true);
         self.page().hide_status();
         self.window.set_title(Some("Kick Lite"));
+        self.refresh_stream_actions();
     }
 
     pub fn go_back(self: &Rc<Self>) {

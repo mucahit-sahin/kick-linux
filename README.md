@@ -68,8 +68,9 @@ The application uses Kick's public, unofficial API endpoints. If Kick's API or C
 | `←` / `→` | Seek 5 seconds backward / forward |
 
 To add a stream to multi-view, use the **+** button on a live channel card on the
-home page, or **Open in mini player** on a channel page. Click a mini player to
-make it the focused stream.
+home page, or **Open in mini player** on a channel page. These controls appear
+only while at least one stream is already playing. Click a mini player to make
+it the focused stream.
 
 ## Installation
 
