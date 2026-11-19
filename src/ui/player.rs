@@ -7,7 +7,7 @@ use crate::mpv;
 use crate::ui::{clear_container, App, Media, MediaKind};
 use gtk::glib;
 use gtk::prelude::*;
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -50,7 +50,10 @@ pub struct PlayerPage {
     /// Pending target when the user changes the progress bar, before it is sent to mpv.
     pub pending_seek: Cell<Option<f64>>,
     pub last_user_change: Cell<Option<Instant>>,
-    pub hide_source: RefCell<Option<glib::SourceId>>,
+    /// Generation counter for delayed control hiding. A timeout is ignored if
+    /// another one (or a page swap) has advanced the counter since it was set.
+    /// Unlike removing a `SourceId`, this can never fail or panic.
+    pub hide_generation: Cell<u64>,
     pub controls_visible: Cell<bool>,
     pub paused_icon: Cell<bool>,
     pub english: Cell<bool>,
@@ -312,7 +315,7 @@ impl PlayerPage {
             status_label,
             pending_seek: Cell::new(None),
             last_user_change: Cell::new(None),
-            hide_source: RefCell::new(None),
+            hide_generation: Cell::new(0),
             controls_visible: Cell::new(true),
             paused_icon: Cell::new(false),
             english: Cell::new(false),

@@ -1978,6 +1978,7 @@ impl App {
             .insert_after(&self.stack_overlay, Some(&self.stack));
 
         focused.set_controls_visible(false);
+        focused.hide_generation.set(focused.hide_generation.get() + 1);
         focused.set_mini_click_enabled(true);
         focused.mini_close.set_visible(true);
         target.set_controls_visible(true);
@@ -2233,24 +2234,31 @@ impl App {
         {
             return;
         }
+        let page = self.page();
+        let generation = page.hide_generation.get() + 1;
+        page.hide_generation.set(generation);
         let a = self.clone();
-        let id = glib::timeout_add_seconds_local(3, move || {
-            a.page().hide_source.replace(None);
+        glib::timeout_add_seconds_local(3, move || {
+            // The timed-out request may belong to a page that is no longer
+            // focused after a swap, so check its own generation first.
+            if page.hide_generation.get() != generation {
+                return glib::ControlFlow::Break;
+            }
             if a.stack.visible_child_name().as_deref() == Some("player")
                 && !a.player.is_paused()
-                && !a.page().quality_popover.is_visible()
+                && !page.quality_popover.is_visible()
             {
-                a.page().set_controls_visible(false);
+                page.set_controls_visible(false);
             }
             glib::ControlFlow::Break
         });
-        self.page().hide_source.replace(Some(id));
     }
 
     pub fn cancel_hide_controls(&self) {
-        if let Some(id) = self.page().hide_source.replace(None) {
-            id.remove();
-        }
+        // Invalidating the generation is enough; the timeout expires on its
+        // own. Removing an already-fired SourceId would panic in glib.
+        let page = self.page();
+        page.hide_generation.set(page.hide_generation.get() + 1);
     }
 
     // ---- search ----
