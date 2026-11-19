@@ -127,15 +127,31 @@ pub fn render(app: &Rc<App>) {
             inner.append(&title);
         }
 
+        let watch_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        watch_row.set_margin_top(4);
+
         let watch = gtk::Button::with_label(app.text("Canlı yayını izle", "Watch live"));
         watch.add_css_class("suggested-action");
         watch.set_halign(gtk::Align::Start);
-        watch.set_margin_top(4);
         {
             let a = app.clone();
             watch.connect_clicked(move |_| a.play_live());
         }
-        inner.append(&watch);
+        watch_row.append(&watch);
+
+        // Multi-view: keep the current stream playing and open this one in a
+        // mini player so several broadcasts can be watched at once.
+        let watch_mini = gtk::Button::with_label(app.text(
+            "Küçük oynatıcıda aç",
+            "Open in mini player",
+        ));
+        watch_mini.set_halign(gtk::Align::Start);
+        {
+            let a = app.clone();
+            watch_mini.connect_clicked(move |_| a.play_live_multi());
+        }
+        watch_row.append(&watch_mini);
+        inner.append(&watch_row);
     } else {
         let title = gtk::Label::new(Some(app.text("Şu anda çevrimdışı", "Currently offline")));
         title.add_css_class("title-3");

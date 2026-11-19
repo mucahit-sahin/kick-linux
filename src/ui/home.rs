@@ -191,6 +191,17 @@ fn card(
         let badge = gtk::Label::new(Some(app.text("CANLI", "LIVE")));
         badge.add_css_class("live-badge");
         name_row.append(&badge);
+        let add_mini = gtk::Button::from_icon_name("list-add-symbolic");
+        add_mini.set_has_frame(false);
+        add_mini.add_css_class("flat");
+        add_mini.set_tooltip_text(Some(app.text(
+            "Küçük oynatıcıda aç (çoklu yayın)",
+            "Open in mini player (multi-view)",
+        )));
+        let a = app.clone();
+        let slug = followed.slug.clone();
+        add_mini.connect_clicked(move |_| a.open_live_multi(slug.clone()));
+        name_row.append(&add_mini);
     }
     content.append(&name_row);
 

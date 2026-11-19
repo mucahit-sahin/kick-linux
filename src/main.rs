@@ -245,6 +245,28 @@ const CSS: &str = r#"
     background-color: rgba(220, 40, 60, 0.92);
 }
 
+/* Extra mini players used by multi-view. */
+.multi-tile {
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.multi-bar {
+    padding: 6px 8px 14px 8px;
+    background-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.78), rgba(0, 0, 0, 0.0));
+}
+.multi-bar-bottom {
+    padding: 14px 8px 6px 8px;
+    background-image: linear-gradient(to top, rgba(0, 0, 0, 0.78), rgba(0, 0, 0, 0.0));
+}
+.multi-bar label,
+.multi-bar button,
+.multi-bar-bottom button { color: #ffffff; }
+.multi-bar button:hover,
+.multi-bar-bottom button:hover { background-color: rgba(255, 255, 255, 0.18); }
+.multi-title {
+    font-size: 11px;
+    font-weight: bold;
+}
+
 .hero-title {
     font-size: 34px;
     font-weight: bold;

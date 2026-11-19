@@ -20,6 +20,11 @@ Player — video playback with quality, speed and silence controls:
 
 - Open by Kick channel name, channel URL, or VOD URL
 - Play livestreams and VODs
+- Multi-view: open up to four additional livestreams in mini players while one
+  stream plays in the main view; click a mini player to swap it into the main
+  view (the previous stream moves back into a mini player). Mini players start
+  muted and can be unmuted individually; they can be closed one by one or all
+  at once from the menu.
 - HLS quality selection
 - Download replays in the quality of your choice and watch them later offline
   (stored under `~/.local/share/kick-lite/downloads`, listed on the home page)
@@ -60,6 +65,10 @@ The application uses Kick's public, unofficial API endpoints. If Kick's API or C
 | `F` | Fullscreen |
 | `Esc` | Back from player / exit fullscreen |
 | `←` / `→` | Seek 5 seconds backward / forward |
+
+To add a stream to multi-view, use the **+** button on a live channel card on the
+home page, or **Open in mini player** on a channel page. Click a mini player to
+make it the focused stream.
 
 ## Installation
 

@@ -12,6 +12,8 @@ use gtk::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::ffi::{c_char, c_double, c_int, c_void, CStr, CString};
 use std::ptr;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 #[repr(C)]
 pub struct mpv_handle {
@@ -177,6 +179,16 @@ pub struct Player {
 
 impl Player {
     pub fn new(noise_db: i32, duration: f64) -> Result<Self> {
+        Self::new_with_cache(noise_db, duration, false)
+    }
+
+    /// Like `new`, but with a smaller demuxer cache. Used by multi-view mini
+    /// players, where several instances share the machine's memory.
+    pub fn new_mini(noise_db: i32, duration: f64) -> Result<Self> {
+        Self::new_with_cache(noise_db, duration, true)
+    }
+
+    fn new_with_cache(noise_db: i32, duration: f64, mini: bool) -> Result<Self> {
         unsafe {
             let handle = mpv_create();
             if handle.is_null() {
@@ -192,7 +204,18 @@ impl Player {
                 silence_active: Cell::new(false),
                 saved_speed: Cell::new(1.0),
             };
-            for (name, value) in options(noise_db, duration) {
+            let mut opts = options(noise_db, duration);
+            if mini {
+                for (name, value) in &mut opts {
+                    match *name {
+                        "demuxer-max-bytes" => *value = "16MiB".into(),
+                        "demuxer-max-back-bytes" => *value = "4MiB".into(),
+                        "demuxer-readahead-secs" => *value = "10".into(),
+                        _ => {}
+                    }
+                }
+            }
+            for (name, value) in opts {
                 if let Err(err) = player.set_option(name, &value) {
                     eprintln!("mpv: {err}");
                 }
@@ -255,7 +278,10 @@ impl Player {
             return false;
         }
 
-        let weak = Box::new(AreaWeak(area.downgrade()));
+        let weak = Box::new(AreaWeak(
+            area.downgrade(),
+            Arc::new(AtomicBool::new(false)),
+        ));
         let weak_ptr = &*weak as *const AreaWeak as *mut c_void;
         unsafe {
             mpv_render_context_set_update_callback(ctx, Some(on_update), weak_ptr);
@@ -751,7 +777,11 @@ mod gl {
 /// GTK objects are not Send; we only use a pointer to carry the weak
 /// reference from mpv's thread to the main loop.
 /// `upgrade()` and `queue_render()` always run on the main thread.
-struct AreaWeak(glib::WeakRef<gtk::GLArea>);
+///
+/// `pending` is shared between all clones of one player's callback context.
+/// It must be per-player: with several mpv instances (multi-view), a single
+/// global flag would swallow frame notifications from the other players.
+struct AreaWeak(glib::WeakRef<gtk::GLArea>, Arc<AtomicBool>);
 unsafe impl Send for AreaWeak {}
 
 impl AreaWeak {
@@ -765,24 +795,24 @@ impl AreaWeak {
 fn clone_area_weak(ctx: *mut c_void) -> AreaWeak {
     unsafe {
         let weak = &*(ctx as *const AreaWeak);
-        AreaWeak(weak.0.clone())
+        AreaWeak(weak.0.clone(), weak.1.clone())
     }
 }
 
 /// Called by mpv (from its own thread) when it draws a new frame.
 unsafe extern "C" fn on_update(ctx: *mut c_void) {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static PENDING: AtomicBool = AtomicBool::new(false);
+    use std::sync::atomic::Ordering;
 
-    // Do not accumulate multiple pending requests; the main loop will draw the frame anyway.
-    if PENDING.swap(true, Ordering::SeqCst) {
+    let weak = clone_area_weak(ctx);
+    // Do not accumulate multiple pending requests for this player; the main
+    // loop will draw the frame anyway.
+    if weak.1.swap(true, Ordering::SeqCst) {
         return;
     }
 
-    let weak = clone_area_weak(ctx);
     // `invoke` is thread-safe; the closure runs on the main loop.
     glib::MainContext::default().invoke(move || {
-        PENDING.store(false, Ordering::SeqCst);
+        weak.1.store(false, Ordering::SeqCst);
         if let Some(area) = weak.area() {
             if area.is_mapped() {
                 area.queue_render();

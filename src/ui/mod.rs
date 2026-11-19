@@ -3,6 +3,7 @@
 pub mod channel;
 pub mod downloads;
 pub mod home;
+pub mod multi;
 pub mod player;
 
 use crate::{api, config, download, fmt, mpv};
@@ -27,6 +28,8 @@ pub enum MediaKind {
 #[derive(Clone, Debug)]
 pub struct Media {
     pub kind: MediaKind,
+    /// Channel slug, used to avoid opening the same stream twice in multi-view.
+    pub slug: Option<String>,
     pub title: String,
     pub subtitle: String,
     /// Master URL, regardless of the selected quality.
@@ -86,6 +89,10 @@ pub struct App {
     pub downloads_scroll: gtk::ScrolledWindow,
     pub player_page: player::PlayerPage,
     pub player: mpv::Player,
+    /// Extra mini players for simultaneous streams (multi-view).
+    pub mini_players: RefCell<Vec<Rc<multi::MiniPlayer>>>,
+    pub multi_box: gtk::Box,
+    mini_seq: Cell<u64>,
     pub language: RefCell<String>,
 
     pub cfg: RefCell<config::Config>,
@@ -131,6 +138,14 @@ fn build_menu(english: bool) -> gio::Menu {
             "Sessizlik ayarları"
         }),
         Some("app.silence-settings"),
+    );
+    model.append(
+        Some(if english {
+            "Close mini players"
+        } else {
+            "Küçük oynatıcıları kapat"
+        }),
+        Some("app.close-mini-players"),
     );
 
     let language_menu = gio::Menu::new();
@@ -341,6 +356,15 @@ impl App {
         stack_overlay.set_child(Some(&stack));
         player_page.page.set_visible(false);
         stack_overlay.add_overlay(&player_page.page);
+        // Mini players stack in the lower-left corner so they never overlap the
+        // single mini view used by the focused player in the lower-right.
+        let multi_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        multi_box.set_halign(gtk::Align::Start);
+        multi_box.set_valign(gtk::Align::End);
+        multi_box.set_margin_start(18);
+        multi_box.set_margin_bottom(18);
+        multi_box.set_visible(false);
+        stack_overlay.add_overlay(&multi_box);
         content.append(&stack_overlay);
 
         let toolbar = adw::ToolbarView::new();
@@ -374,6 +398,9 @@ impl App {
             downloads_scroll,
             player_page,
             player,
+            mini_players: RefCell::new(Vec::new()),
+            multi_box,
+            mini_seq: Cell::new(0),
             language: RefCell::new(language),
             cfg: RefCell::new(cfg),
             auto_levels: RefCell::new(Vec::new()),
@@ -419,6 +446,7 @@ impl App {
         setup_actions(gtk_app, &app);
         install_language_actions(gtk_app, &app);
         install_silence_settings_action(gtk_app, &app);
+        install_multi_actions(gtk_app, &app);
         {
             let a = app.clone();
             sidebar_toggle.connect_clicked(move |_| {
@@ -946,6 +974,7 @@ impl App {
                 a.save_current_position();
                 let cfg = a.cfg.borrow().clone();
                 let _ = config::save(&cfg);
+                a.close_all_multi();
                 a.player.shutdown();
                 // Timeouts hold the App with an Rc and can keep the main loop alive.
                 // End the application when the last window closes.
@@ -1523,6 +1552,7 @@ impl App {
         let url = path.to_string_lossy().to_string();
         let media = Media {
             kind: MediaKind::Vod,
+            slug: Some(item.channel_slug.clone()),
             title: item.title.clone(),
             subtitle: item.subtitle.clone(),
             master: url.clone(),
@@ -1583,6 +1613,7 @@ impl App {
                             };
                             let media = Media {
                                 kind: MediaKind::Live,
+                                slug: Some(fresh.slug.clone()),
                                 title,
                                 subtitle: live_subtitle(&fresh),
                                 master: url.clone(),
@@ -1621,6 +1652,11 @@ impl App {
             .unwrap_or(0.0);
         let media = Media {
             kind: MediaKind::Vod,
+            slug: self
+                .current_channel
+                .borrow()
+                .as_ref()
+                .map(|ch| ch.slug.clone()),
             title: vod.title().to_string(),
             subtitle: vod_subtitle(&vod),
             master: url.clone(),
@@ -1635,6 +1671,7 @@ impl App {
     pub fn play_resume(self: &Rc<Self>, video: config::ResumeVideo) {
         let media = Media {
             kind: MediaKind::Vod,
+            slug: None,
             title: video.title,
             subtitle: video.subtitle,
             master: video.url.clone(),
@@ -1700,6 +1737,155 @@ impl App {
             self.player_page.quality_btn.set_sensitive(false);
             self.player_page.set_variants(self, Vec::new());
         }
+    }
+
+    // ---- multi-view ----
+
+    /// Adds a live channel to the mini players without interrupting playback.
+    pub fn open_live_multi(self: &Rc<Self>, slug: String) {
+        let a = self.clone();
+        spawn_task(
+            move || api::channel(&slug),
+            move |result| match result {
+                Ok(ch) => match ch.live_url().map(|u| u.to_string()) {
+                    Some(url) => {
+                        let title = if ch.stream_title().is_empty() {
+                            ch.display_name().to_string()
+                        } else {
+                            ch.stream_title().to_string()
+                        };
+                        a.add_multi_media(Media {
+                            kind: MediaKind::Live,
+                            slug: Some(ch.slug.clone()),
+                            title,
+                            subtitle: live_subtitle(&ch),
+                            master: url.clone(),
+                            url,
+                            duration: None,
+                            start: 0.0,
+                            download_id: None,
+                        });
+                    }
+                    None => a.toast(a.text("Kanal şu anda canlı değil", "Channel is not live right now")),
+                },
+                Err(err) => a.toast(&format!("{err:#}")),
+            },
+        );
+    }
+
+    /// Entry point from the "open in mini player" button on the channel page.
+    pub fn play_live_multi(self: &Rc<Self>) {
+        let Some(slug) = self
+            .current_channel
+            .borrow()
+            .as_ref()
+            .map(|ch| ch.slug.clone())
+        else {
+            return;
+        };
+        self.open_live_multi(slug);
+    }
+
+    /// Each tile owns a libmpv instance, so keep a small cap to protect memory.
+    const MAX_MINI_PLAYERS: usize = 4;
+
+    fn add_multi_media(self: &Rc<Self>, media: Media) {
+        if media.slug.is_some() {
+            let already_mini = self
+                .mini_players
+                .borrow()
+                .iter()
+                .any(|mini| mini.media.slug == media.slug);
+            let already_main = self
+                .current_media
+                .borrow()
+                .as_ref()
+                .is_some_and(|m| m.slug == media.slug);
+            if already_mini || already_main {
+                self.toast(self.text("Bu yayın zaten açık", "This stream is already open"));
+                return;
+            }
+        }
+        if self.mini_players.borrow().len() >= Self::MAX_MINI_PLAYERS {
+            self.toast(self.text(
+                "En fazla 4 küçük oynatıcı açabilirsin",
+                "You can open at most 4 mini players",
+            ));
+            return;
+        }
+        self.insert_mini(media);
+    }
+
+    fn insert_mini(self: &Rc<Self>, media: Media) {
+        let id = self.mini_seq.get() + 1;
+        self.mini_seq.set(id);
+        let Some(mini) = multi::MiniPlayer::new(&self, id, media) else {
+            return;
+        };
+        self.multi_box.append(&mini.tile);
+        self.mini_players.borrow_mut().push(mini);
+        self.multi_box.set_visible(true);
+    }
+
+    pub fn close_multi(&self, id: u64) {
+        let removed = {
+            let mut minis = self.mini_players.borrow_mut();
+            minis
+                .iter()
+                .position(|mini| mini.id == id)
+                .map(|pos| minis.remove(pos))
+        };
+        if let Some(mini) = removed {
+            // Unparent first: unrealizing the GLArea detaches mpv's render
+            // context, then shutdown destroys the handle safely.
+            mini.tile.unparent();
+            mini.player.shutdown();
+            if self.mini_players.borrow().is_empty() {
+                self.multi_box.set_visible(false);
+            }
+        }
+    }
+
+    /// Shuts down every extra player (used by the menu action and on exit).
+    pub fn close_all_multi(&self) {
+        for mini in self.mini_players.borrow_mut().drain(..) {
+            mini.tile.unparent();
+            mini.player.shutdown();
+        }
+        self.multi_box.set_visible(false);
+    }
+
+    /// Swaps a mini player with the focused full player. Both streams reload
+    /// from their live edge; neither one is dropped.
+    pub fn promote_multi(self: &Rc<Self>, id: u64) {
+        let Some(mini) = self
+            .mini_players
+            .borrow()
+            .iter()
+            .find(|mini| mini.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        let media = mini.media.clone();
+        self.close_multi(id);
+
+        // Move the currently focused stream into the slot that just opened up.
+        if let Some(mut focused) = self.current_media.borrow().clone() {
+            if focused.kind == MediaKind::Vod {
+                if let Some(pos) = self.player.position() {
+                    focused.start = pos;
+                }
+            }
+            self.insert_mini(focused);
+        }
+
+        let return_page = match self.stack.visible_child_name().as_deref() {
+            Some("channel") => "channel",
+            Some("downloads") => "downloads",
+            _ => "home",
+        };
+        self.play_media(media, return_page);
     }
 
     pub fn switch_quality(self: &Rc<Self>, url: Option<String>, label: String) {
@@ -1951,6 +2137,7 @@ impl App {
                                     .unwrap_or(0.0);
                                 let media = Media {
                                     kind: MediaKind::Vod,
+                                    slug: Some(channel.clone()),
                                     title: vod.title().to_string(),
                                     subtitle: vod_subtitle(&vod),
                                     master: url.clone(),
@@ -2078,6 +2265,11 @@ impl App {
         // the mini player is active). Since silence skipping is implemented as a
         // speed change, it is triggered here.
         self.player.poll_events();
+        // Extra players are always live streams; drain their queues too so mpv
+        // does not accumulate events while a tile sits in the corner.
+        for mini in self.mini_players.borrow().iter() {
+            mini.player.poll_events();
+        }
         self.sample_auto_silence();
 
         if self.stack.visible_child_name().as_deref() != Some("player") {
@@ -2309,6 +2501,13 @@ fn install_silence_settings_action(gtk_app: &adw::Application, app: &Rc<App>) {
     let action = gio::SimpleAction::new("silence-settings", None);
     let a = app.clone();
     action.connect_activate(move |_, _| a.show_silence_settings());
+    gtk_app.add_action(&action);
+}
+
+fn install_multi_actions(gtk_app: &adw::Application, app: &Rc<App>) {
+    let action = gio::SimpleAction::new("close-mini-players", None);
+    let a = app.clone();
+    action.connect_activate(move |_, _| a.close_all_multi());
     gtk_app.add_action(&action);
 }
 
