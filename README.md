@@ -21,8 +21,9 @@ Player — video playback with quality, speed and silence controls:
 - Open by Kick channel name, channel URL, or VOD URL
 - Play livestreams and VODs
 - Multi-view: open up to four additional livestreams in mini players while one
-  stream plays in the main view; click a mini player to swap it into the main
-  view (the previous stream moves back into a mini player). Mini players start
+  stream plays in the main view; click a mini player to swap the two streams
+  instantly, without reloading either one (the previous stream moves back into
+  a mini player). Mini players start
   muted and can be unmuted individually; they can be closed one by one or all
   at once from the menu.
 - HLS quality selection

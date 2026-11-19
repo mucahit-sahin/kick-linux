@@ -81,17 +81,20 @@ pub struct App {
     pub add_btn: gtk::Button,
     menu_btn: gtk::MenuButton,
     pub stack: gtk::Stack,
+    stack_overlay: gtk::Overlay,
     pub home_box: gtk::Box,
     pub home_scroll: gtk::ScrolledWindow,
     pub channel_box: gtk::Box,
     pub channel_scroll: gtk::ScrolledWindow,
     pub downloads_box: gtk::Box,
     pub downloads_scroll: gtk::ScrolledWindow,
-    pub player_page: player::PlayerPage,
-    pub player: mpv::Player,
-    /// Extra mini players for simultaneous streams (multi-view).
+    /// The page currently shown full-screen. Swapping a mini player replaces
+    /// this reference, so all player UI helpers follow the focused stream.
+    pub player_page: RefCell<Rc<player::PlayerPage>>,
+    /// Swappable handle for the focused stream.
+    pub player: mpv::SharedPlayer,
+    /// Extra players for simultaneous streams (multi-view).
     pub mini_players: RefCell<Vec<Rc<multi::MiniPlayer>>>,
-    pub multi_box: gtk::Box,
     mini_seq: Cell<u64>,
     pub language: RefCell<String>,
 
@@ -329,7 +332,11 @@ impl App {
         downloads_scroll.set_child(Some(&downloads_box));
         downloads_scroll.set_vexpand(true);
 
-        let player_page = player::PlayerPage::new();
+        let page_player = mpv::SharedPlayer::new(player);
+        // The app's player handle can be repointed when another page takes over
+        // the full-screen slot; the page keeps its own stable handle.
+        let app_player = page_player.fork();
+        let player_page = Rc::new(player::PlayerPage::new(page_player));
 
         stack.add_named(&home_scroll, Some("home"));
         stack.add_named(&channel_scroll, Some("channel"));
@@ -355,16 +362,9 @@ impl App {
         stack_overlay.set_vexpand(true);
         stack_overlay.set_child(Some(&stack));
         player_page.page.set_visible(false);
+        // Every stream's page is a sibling overlay. Swapping streams only
+        // changes which page has the full layout and which are mini tiles.
         stack_overlay.add_overlay(&player_page.page);
-        // Mini players stack in the lower-left corner so they never overlap the
-        // single mini view used by the focused player in the lower-right.
-        let multi_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        multi_box.set_halign(gtk::Align::Start);
-        multi_box.set_valign(gtk::Align::End);
-        multi_box.set_margin_start(18);
-        multi_box.set_margin_bottom(18);
-        multi_box.set_visible(false);
-        stack_overlay.add_overlay(&multi_box);
         content.append(&stack_overlay);
 
         let toolbar = adw::ToolbarView::new();
@@ -390,16 +390,16 @@ impl App {
             add_btn,
             menu_btn,
             stack,
+            stack_overlay,
             home_box,
             home_scroll,
             channel_box,
             channel_scroll,
             downloads_box,
             downloads_scroll,
-            player_page,
-            player,
+            player_page: RefCell::new(player_page),
+            player: app_player,
             mini_players: RefCell::new(Vec::new()),
-            multi_box,
             mini_seq: Cell::new(0),
             language: RefCell::new(language),
             cfg: RefCell::new(cfg),
@@ -458,6 +458,11 @@ impl App {
         home::render(&app);
         app.present();
         app
+    }
+
+    /// The page currently shown in the full player slot.
+    fn page(&self) -> Rc<player::PlayerPage> {
+        self.player_page.borrow().clone()
     }
 
     pub fn is_english(&self) -> bool {
@@ -812,7 +817,10 @@ impl App {
         } else {
             "Henüz kanal takip etmiyorsun.\nÜstteki arama alanına bir kanal adı yaz."
         });
-        self.player_page.set_language(en);
+        self.page().set_language(en);
+        for mini in self.mini_players.borrow().iter() {
+            mini.page.borrow().set_language(en);
+        }
         self.downloads_btn.set_tooltip_text(Some(if en { "Downloads" } else { "İndirilenler" }));
         self.rebuild_sidebar();
         home::render(self);
@@ -831,7 +839,7 @@ impl App {
     }
 
     fn wire(self: &Rc<Self>) {
-        self.player_page.wire(self.clone());
+        self.page().wire(self.clone());
 
         // Search
         {
@@ -941,8 +949,8 @@ impl App {
                 }
                 if keyval == Key::Up || keyval == Key::Down {
                     let step = if keyval == Key::Up { 5.0 } else { -5.0 };
-                    let v = (a.player_page.volume.value() + step).clamp(0.0, 100.0);
-                    a.player_page.volume.set_value(v);
+                    let v = (a.page().volume.value() + step).clamp(0.0, 100.0);
+                    a.page().volume.set_value(v);
                     return glib::Propagation::Stop;
                 }
                 glib::Propagation::Proceed
@@ -958,7 +966,7 @@ impl App {
                     let fs = win.is_fullscreen();
                     a.toolbar.set_reveal_top_bars(!fs);
                     a.sidebar.set_visible(!fs);
-                    a.player_page.fs.set_icon_name(if fs {
+                    a.page().fs.set_icon_name(if fs {
                         "view-restore-symbolic"
                     } else {
                         "view-fullscreen-symbolic"
@@ -1697,15 +1705,15 @@ impl App {
         self.live_catch_up.set(catch_up);
         self.player.set_silence_allowed(media.kind == MediaKind::Vod);
         self.player.set_speed(if catch_up { 2.0 } else { 1.0 });
-        self.player_page.speed_btn.set_label(if catch_up { "2x" } else { "1x" });
+        self.page().speed_btn.set_label(if catch_up { "2x" } else { "1x" });
 
-        self.player_page.set_media(&media);
+        self.page().set_media(&media);
         self.current_media.replace(Some(media.clone()));
         self.show_full_player();
         self.stack.set_visible_child_name("player");
         self.window
             .set_title(Some(&format!("{} — Kick Lite", fmt::shorten(&media.title, 48))));
-        self.player_page.set_controls_visible(true);
+        self.page().set_controls_visible(true);
         self.poke_controls();
 
         let start = if media.kind == MediaKind::Vod {
@@ -1715,13 +1723,13 @@ impl App {
         };
         if let Err(err) = self.player.load(&media.url, start) {
             self.phase.set(Phase::Ended);
-            self.player_page.show_status(self.text("Yayın açılamadı", "Could not open stream"));
+            self.page().show_status(self.text("Yayın açılamadı", "Could not open stream"));
             self.toast(&format!("{err:#}"));
         }
 
         // Offline downloads have a fixed quality baked into the local playlist.
         if media.download_id.is_none() {
-            self.player_page.quality_btn.set_sensitive(true);
+            self.page().quality_btn.set_sensitive(true);
             let master = media.master.clone();
             let a = self.clone();
             spawn_task(
@@ -1730,12 +1738,12 @@ impl App {
                     if a.media_seq.get() != seq {
                         return;
                     }
-                    a.player_page.set_variants(&a, variants);
+                    a.page().set_variants(&a, variants);
                 },
             );
         } else {
-            self.player_page.quality_btn.set_sensitive(false);
-            self.player_page.set_variants(self, Vec::new());
+            self.page().quality_btn.set_sensitive(false);
+            self.page().set_variants(self, Vec::new());
         }
     }
 
@@ -1795,7 +1803,7 @@ impl App {
                 .mini_players
                 .borrow()
                 .iter()
-                .any(|mini| mini.media.slug == media.slug);
+                .any(|mini| mini.media.borrow().slug == media.slug);
             let already_main = self
                 .current_media
                 .borrow()
@@ -1822,9 +1830,20 @@ impl App {
         let Some(mini) = multi::MiniPlayer::new(&self, id, media) else {
             return;
         };
-        self.multi_box.append(&mini.tile);
+        let index = self.mini_players.borrow().len();
+        let page = mini.page.borrow().clone();
+        self.stack_overlay.add_overlay(&page.page);
+        Self::set_mini_layout(&page.page, index);
+        page.page
+            .insert_before(&self.stack_overlay, None::<&gtk::Widget>);
         self.mini_players.borrow_mut().push(mini);
-        self.multi_box.set_visible(true);
+    }
+
+    fn close_mini(&self, mini: &multi::MiniPlayer) {
+        let page = mini.page.borrow().clone();
+        // Unparent before shutdown so the GLArea detaches its render context.
+        page.page.unparent();
+        mini.player.borrow().shutdown();
     }
 
     pub fn close_multi(&self, id: u64) {
@@ -1836,56 +1855,190 @@ impl App {
                 .map(|pos| minis.remove(pos))
         };
         if let Some(mini) = removed {
-            // Unparent first: unrealizing the GLArea detaches mpv's render
-            // context, then shutdown destroys the handle safely.
-            mini.tile.unparent();
-            mini.player.shutdown();
-            if self.mini_players.borrow().is_empty() {
-                self.multi_box.set_visible(false);
-            }
+            self.close_mini(&mini);
+            self.reindex_minis();
+        }
+    }
+
+    /// Closes either the focused player or one of the mini tiles by its page.
+    pub fn close_page(self: &Rc<Self>, page: &Rc<player::PlayerPage>) {
+        if Rc::ptr_eq(&self.page(), page) {
+            self.stop_player();
+            return;
+        }
+        let id = self
+            .mini_players
+            .borrow()
+            .iter()
+            .find(|mini| Rc::ptr_eq(&mini.page.borrow(), page))
+            .map(|mini| mini.id);
+        if let Some(id) = id {
+            self.close_multi(id);
         }
     }
 
     /// Shuts down every extra player (used by the menu action and on exit).
     pub fn close_all_multi(&self) {
         for mini in self.mini_players.borrow_mut().drain(..) {
-            mini.tile.unparent();
-            mini.player.shutdown();
+            self.close_mini(&mini);
         }
-        self.multi_box.set_visible(false);
     }
 
-    /// Swaps a mini player with the focused full player. Both streams reload
-    /// from their live edge; neither one is dropped.
-    pub fn promote_multi(self: &Rc<Self>, id: u64) {
-        let Some(mini) = self
+    // Layout is only a matter of size/alignment: the GLArea and its mpv render
+    // context never move, so switching between these two layouts is instant.
+    fn set_full_layout(page: &gtk::Overlay) {
+        page.remove_css_class("mini-player");
+        page.set_margin_top(0);
+        page.set_margin_bottom(0);
+        page.set_margin_start(0);
+        page.set_margin_end(0);
+        page.set_halign(gtk::Align::Fill);
+        page.set_valign(gtk::Align::Fill);
+        page.set_hexpand(true);
+        page.set_vexpand(true);
+        page.set_size_request(-1, -1);
+        page.set_visible(true);
+    }
+
+    fn set_mini_layout(page: &gtk::Overlay, index: usize) {
+        page.add_css_class("mini-player");
+        page.set_margin_top(0);
+        page.set_margin_start(18);
+        page.set_margin_end(0);
+        page.set_margin_bottom(18 + (index as i32) * 168);
+        page.set_halign(gtk::Align::Start);
+        page.set_valign(gtk::Align::End);
+        page.set_hexpand(false);
+        page.set_vexpand(false);
+        page.set_size_request(260, 156);
+        page.set_visible(true);
+    }
+
+    fn reindex_minis(&self) {
+        for (index, mini) in self.mini_players.borrow().iter().enumerate() {
+            let page = mini.page.borrow().clone();
+            Self::set_mini_layout(&page.page, index);
+        }
+    }
+
+    /// Swaps the focused page with a mini page. Only the player handles and
+    /// metadata are exchanged: both mpv instances keep playing in their own
+    /// GLArea, so neither stream is reloaded.
+    pub fn promote_page(self: &Rc<Self>, target: &Rc<player::PlayerPage>) {
+        let focused = self.page();
+        if Rc::ptr_eq(&focused, target) {
+            self.resume_player();
+            return;
+        }
+        let mini = self
             .mini_players
             .borrow()
             .iter()
-            .find(|mini| mini.id == id)
-            .cloned()
-        else {
+            .find(|mini| Rc::ptr_eq(&mini.page.borrow(), target))
+            .cloned();
+        let Some(mini) = mini else {
             return;
         };
-        let media = mini.media.clone();
-        self.close_multi(id);
+        let incoming = mini.media.borrow().clone();
 
-        // Move the currently focused stream into the slot that just opened up.
-        if let Some(mut focused) = self.current_media.borrow().clone() {
-            if focused.kind == MediaKind::Vod {
-                if let Some(pos) = self.player.position() {
-                    focused.start = pos;
-                }
-            }
-            self.insert_mini(focused);
+        // Nothing full-screen to trade with: just open this stream normally.
+        if self.current_media.borrow().is_none() {
+            self.close_multi(mini.id);
+            self.play_media(incoming, "home");
+            return;
         }
 
-        let return_page = match self.stack.visible_child_name().as_deref() {
-            Some("channel") => "channel",
-            Some("downloads") => "downloads",
-            _ => "home",
-        };
-        self.play_media(media, return_page);
+        self.save_current_position();
+
+        // Repoint only the app's mini/full handles. Each page keeps its own
+        // handle, so no mpv player ever leaves its GLArea or render context.
+        self.player.repoint(&mini.player.borrow());
+        mini.player.borrow_mut().repoint(&focused.player);
+        {
+            let mut current = self.current_media.borrow_mut();
+            let mut tile = mini.media.borrow_mut();
+            if let Some(main) = current.take() {
+                let old_tile = std::mem::replace(&mut *tile, main);
+                *current = Some(old_tile);
+            }
+        }
+        *self.player_page.borrow_mut() = target.clone();
+        *mini.page.borrow_mut() = focused.clone();
+
+        // Exchange the layouts. Each page keeps its GLArea/render context, so
+        // the demoted stream simply becomes small and the promoted one full.
+        Self::set_mini_layout(&focused.page, 0);
+        Self::set_full_layout(&target.page);
+        self.reindex_minis();
+        // The focused page goes to the bottom of the overlay stack; minis stay
+        // on top of it so they remain visible and clickable. This only changes
+        // sibling order, so the GLArea stays realized with its GL context.
+        target
+            .page
+            .insert_after(&self.stack_overlay, Some(&self.stack));
+
+        focused.set_controls_visible(false);
+        focused.set_mini_click_enabled(true);
+        focused.mini_close.set_visible(true);
+        target.set_controls_visible(true);
+        target.set_mini_click_enabled(false);
+        target.mini_close.set_visible(false);
+
+        // Sound follows the slot; the tile goes back to being muted.
+        let cfg = self.cfg.borrow().clone();
+        self.player.set_volume(cfg.volume);
+        self.player.set_mute(cfg.muted);
+        mini.player.borrow().set_mute(true);
+        mini.update_media_ui();
+        focused.set_paused(mini.player.borrow().is_paused());
+        target.set_paused(self.player.is_paused());
+
+        // Adopt the incoming stream as already playing (no loading status).
+        self.media_seq.set(self.media_seq.get() + 1);
+        let seq = self.media_seq.get();
+        self.phase.set(Phase::Playing);
+        self.load_started.set(None);
+        self.resume_pending.set(None);
+        self.live_catch_up.set(false);
+        self.reset_auto_silence();
+        target.set_media_info(&incoming);
+        target.hide_status();
+        target.speed_btn.set_label("1x");
+        target.quality_btn.set_sensitive(incoming.download_id.is_none());
+
+        self.stack.set_visible_child_name("player");
+        self.window.set_title(Some(&format!(
+            "{} — Kick Lite",
+            fmt::shorten(&incoming.title, 48)
+        )));
+        self.poke_controls();
+
+        // Quality options belong to the stream, so refresh them for the new one.
+        if incoming.download_id.is_none() {
+            let master = incoming.master.clone();
+            let a = self.clone();
+            spawn_task(
+                move || api::hls_variants(&master).unwrap_or_default(),
+                move |variants| {
+                    if a.media_seq.get() != seq {
+                        return;
+                    }
+                    a.page().set_variants(&a, variants);
+                },
+            );
+        } else {
+            self.page().set_variants(self, Vec::new());
+        }
+    }
+
+    /// A click on a tile promotes it; a click on the already focused page
+    /// restores it from mini size to the full player.
+    pub fn activate_page(self: &Rc<Self>, page: &Rc<player::PlayerPage>) {
+        if Rc::ptr_eq(&self.page(), page) {
+            self.resume_player();
+        } else {
+            self.promote_page(page);
+        }
     }
 
     pub fn switch_quality(self: &Rc<Self>, url: Option<String>, label: String) {
@@ -1900,12 +2053,12 @@ impl App {
         }
         media.url = url.unwrap_or_else(|| media.master.clone());
         self.current_media.replace(Some(media.clone()));
-        self.player_page.quality_btn.set_label(&label);
-        self.player_page.quality_popover.popdown();
+        self.page().quality_btn.set_label(&label);
+        self.page().quality_popover.popdown();
         self.phase.set(Phase::Loading);
         self.load_started.set(Some(Instant::now()));
-        self.player_page.spinner.start();
-        self.player_page.show_status(self.text("Kalite değiştiriliyor…", "Changing quality…"));
+        self.page().spinner.start();
+        self.page().show_status(self.text("Kalite değiştiriliyor…", "Changing quality…"));
         let start = if media.kind == MediaKind::Vod {
             Some(pos.max(media.start))
         } else {
@@ -1925,13 +2078,13 @@ impl App {
         self.resume_pending.set(None);
         self.live_catch_up.set(false);
         self.current_media.replace(None);
-        self.player_page.page.set_visible(false);
+        self.page().page.set_visible(false);
         self.media_seq.set(self.media_seq.get() + 1);
         self.phase.set(Phase::Idle);
         self.load_started.set(None);
         self.cancel_hide_controls();
-        self.player_page.set_controls_visible(true);
-        self.player_page.hide_status();
+        self.page().set_controls_visible(true);
+        self.page().hide_status();
         self.window.set_title(Some("Kick Lite"));
     }
 
@@ -1988,44 +2141,37 @@ impl App {
     /// Moves the video back to the main player area when the mini player is clicked.
     pub fn resume_player(self: &Rc<Self>) {
         let Some(media) = self.current_media.borrow().clone() else {
-            self.player_page.page.set_visible(false);
+            self.page().page.set_visible(false);
             return;
         };
         self.show_full_player();
         self.stack.set_visible_child_name("player");
-        self.player_page.set_controls_visible(true);
+        self.page().set_controls_visible(true);
         self.window
             .set_title(Some(&format!("{} — Kick Lite", fmt::shorten(&media.title, 48))));
         self.poke_controls();
     }
 
     fn show_full_player(&self) {
-        self.player_page.page.remove_css_class("mini-player");
-        self.player_page.set_mini_click_enabled(false);
-        self.player_page.mini_close.set_visible(false);
-        self.player_page.page.set_margin_end(0);
-        self.player_page.page.set_margin_bottom(0);
-        self.player_page.page.set_visible(true);
-        self.player_page.page.set_halign(gtk::Align::Fill);
-        self.player_page.page.set_valign(gtk::Align::Fill);
-        self.player_page.page.set_hexpand(true);
-        self.player_page.page.set_vexpand(true);
-        self.player_page.page.set_size_request(-1, -1);
+        let page = self.page();
+        Self::set_full_layout(&page.page);
+        page.set_mini_click_enabled(false);
+        page.mini_close.set_visible(false);
+        page.set_controls_visible(true);
+        // Keep other streams' tiles above the full player.
+        page.page
+            .insert_after(&self.stack_overlay, Some(&self.stack));
     }
 
     fn show_mini_player(&self) {
-        self.player_page.page.add_css_class("mini-player");
-        self.player_page.set_mini_click_enabled(true);
-        self.player_page.mini_close.set_visible(true);
-        self.player_page.page.set_margin_end(18);
-        self.player_page.page.set_margin_bottom(18);
-        self.player_page.set_controls_visible(false);
-        self.player_page.page.set_visible(true);
-        self.player_page.page.set_halign(gtk::Align::End);
-        self.player_page.page.set_valign(gtk::Align::End);
-        self.player_page.page.set_hexpand(false);
-        self.player_page.page.set_vexpand(false);
-        self.player_page.page.set_size_request(320, 180);
+        let page = self.page();
+        let index = self.mini_players.borrow().len();
+        Self::set_mini_layout(&page.page, index);
+        page.set_mini_click_enabled(true);
+        page.mini_close.set_visible(true);
+        page.set_controls_visible(false);
+        page.page
+            .insert_before(&self.stack_overlay, None::<&gtk::Widget>);
     }
 
     pub fn toggle_fullscreen(&self) {
@@ -2037,7 +2183,7 @@ impl App {
     }
 
     pub fn sync_pause_icon(&self) {
-        self.player_page.set_paused(self.player.is_paused());
+        self.page().set_paused(self.player.is_paused());
     }
 
     /// Reduces latency by consuming the live buffer at 2x speed.
@@ -2051,14 +2197,14 @@ impl App {
             return;
         }
         self.player.set_speed(2.0);
-        self.player_page.speed_btn.set_label("2x");
+        self.page().speed_btn.set_label("2x");
         self.live_catch_up.set(true);
         self.toast(self.text("Gecikme azaltılıyor; canlı yayın 2x hızda oynatılıyor", "Reducing latency; playing the live stream at 2x"));
     }
 
     pub fn update_volume_icon(&self) {
         let muted = self.player.is_muted();
-        let v = self.player_page.volume.value();
+        let v = self.page().volume.value();
         let icon = if muted || v <= 0.5 {
             "audio-volume-muted-symbolic"
         } else if v < 34.0 {
@@ -2068,11 +2214,11 @@ impl App {
         } else {
             "audio-volume-high-symbolic"
         };
-        self.player_page.vol_btn.set_icon_name(icon);
+        self.page().vol_btn.set_icon_name(icon);
     }
 
     pub fn poke_controls(self: &Rc<Self>) {
-        self.player_page.set_controls_visible(true);
+        self.page().set_controls_visible(true);
         self.schedule_hide_controls();
     }
 
@@ -2082,27 +2228,27 @@ impl App {
             return;
         }
         if self.player.is_paused()
-            || self.player_page.quality_popover.is_visible()
+            || self.page().quality_popover.is_visible()
             || self.current_media.borrow().is_none()
         {
             return;
         }
         let a = self.clone();
         let id = glib::timeout_add_seconds_local(3, move || {
-            a.player_page.hide_source.replace(None);
+            a.page().hide_source.replace(None);
             if a.stack.visible_child_name().as_deref() == Some("player")
                 && !a.player.is_paused()
-                && !a.player_page.quality_popover.is_visible()
+                && !a.page().quality_popover.is_visible()
             {
-                a.player_page.set_controls_visible(false);
+                a.page().set_controls_visible(false);
             }
             glib::ControlFlow::Break
         });
-        self.player_page.hide_source.replace(Some(id));
+        self.page().hide_source.replace(Some(id));
     }
 
     pub fn cancel_hide_controls(&self) {
-        if let Some(id) = self.player_page.hide_source.replace(None) {
+        if let Some(id) = self.page().hide_source.replace(None) {
             id.remove();
         }
     }
@@ -2268,7 +2414,7 @@ impl App {
         // Extra players are always live streams; drain their queues too so mpv
         // does not accumulate events while a tile sits in the corner.
         for mini in self.mini_players.borrow().iter() {
-            mini.player.poll_events();
+            mini.player.borrow().poll_events();
         }
         self.sample_auto_silence();
 
@@ -2289,12 +2435,12 @@ impl App {
                         self.player.seek(position, true);
                     }
                     self.phase.set(Phase::Playing);
-                    self.player_page.hide_status();
+                    self.page().hide_status();
                 } else if let Some(started) = self.load_started.get() {
                     if started.elapsed().as_secs_f64() > 12.0 && self.player.is_idle() {
                         self.phase.set(Phase::Ended);
-                        self.player_page.spinner.stop();
-                        self.player_page.show_status(if live {
+                        self.page().spinner.stop();
+                        self.page().show_status(if live {
                             if self.is_english() { "Could not connect to stream or stream ended" } else { "Yayına bağlanılamadı ya da yayın sona erdi" }
                         } else {
                             if self.is_english() { "Could not open stream" } else { "Yayın açılamadı" }
@@ -2306,14 +2452,14 @@ impl App {
             Phase::Playing if self.player.is_idle() => {
                 self.phase.set(Phase::Ended);
                 self.player.clear_silence();
-                self.player_page.spinner.stop();
-                self.player_page.show_status(if live {
+                self.page().spinner.stop();
+                self.page().show_status(if live {
                     if self.is_english() { "Live stream ended" } else { "Canlı yayın sona erdi" }
                 } else {
                     if self.is_english() { "Video ended" } else { "Yayın sona erdi" }
                 });
                 self.cancel_hide_controls();
-                self.player_page.set_controls_visible(true);
+                self.page().set_controls_visible(true);
             }
             _ => {}
         }
@@ -2327,7 +2473,7 @@ impl App {
                 && self.player.cache_duration().is_some_and(|seconds| seconds <= 0.5)
             {
                 self.player.set_speed(1.0);
-                self.player_page.speed_btn.set_label("1x");
+                self.page().speed_btn.set_label("1x");
                 self.live_catch_up.set(false);
                 self.toast(self.text("Canlı yayın güncel noktaya ulaştı; hız normale döndü", "Live stream caught up; playback speed restored"));
             }
@@ -2336,28 +2482,28 @@ impl App {
 
         if let Some(duration) = self.player.duration() {
             if duration > 0.0 {
-                self.player_page.seek.adjustment().set_upper(duration);
-                self.player_page.dur.set_text(&fmt::duration(duration));
+                self.page().seek.adjustment().set_upper(duration);
+                self.page().dur.set_text(&fmt::duration(duration));
             }
         }
 
-        if let Some(target) = self.player_page.pending_seek.get() {
+        if let Some(target) = self.page().pending_seek.get() {
             let waited = self
-                .player_page
+                .page()
                 .last_user_change
                 .get()
                 .map(|t| t.elapsed().as_millis())
                 .unwrap_or(u128::MAX);
             if waited >= 350 {
-                self.player_page.pending_seek.set(None);
+                self.page().pending_seek.set(None);
                 self.player.clear_silence();
                 self.player.seek(target, true);
-                self.player_page.seek.set_value(target);
-                self.player_page.pos.set_text(&fmt::duration(target));
+                self.page().seek.set_value(target);
+                self.page().pos.set_text(&fmt::duration(target));
             }
         } else if let Some(pos) = self.player.position() {
-            self.player_page.pos.set_text(&fmt::duration(pos));
-            self.player_page.seek.set_value(pos);
+            self.page().pos.set_text(&fmt::duration(pos));
+            self.page().seek.set_value(pos);
             if media.kind == MediaKind::Vod && media.download_id.is_none() {
                 self.cfg
                     .borrow_mut()

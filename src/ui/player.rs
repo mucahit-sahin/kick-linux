@@ -3,6 +3,7 @@
 use crate::api;
 use crate::config;
 use crate::fmt;
+use crate::mpv;
 use crate::ui::{clear_container, App, Media, MediaKind};
 use gtk::glib;
 use gtk::prelude::*;
@@ -11,6 +12,9 @@ use std::rc::Rc;
 use std::time::Instant;
 
 pub struct PlayerPage {
+    /// Stable handle for this page's player. It is never repointed: the mpv
+    /// render context belongs to this player and this page's GLArea.
+    pub player: mpv::SharedPlayer,
     pub page: gtk::Overlay,
     pub area: gtk::GLArea,
     pub controls: gtk::Box,
@@ -53,7 +57,7 @@ pub struct PlayerPage {
 }
 
 impl PlayerPage {
-    pub fn new() -> Self {
+    pub fn new(player: mpv::SharedPlayer) -> Self {
         let area = gtk::GLArea::new();
         area.set_hexpand(true);
         area.set_vexpand(true);
@@ -274,6 +278,7 @@ impl PlayerPage {
         page.add_overlay(&mini_close);
 
         Self {
+            player,
             page,
             area,
             controls,
@@ -314,12 +319,22 @@ impl PlayerPage {
         }
     }
 
-    pub fn wire(&self, app: Rc<App>) {
-        // GLArea lifecycle
+    /// Each page is wired to its own stable player handle, so its render
+    /// context always matches the GLArea it draws into.
+    pub fn wire(self: &Rc<Self>, app: Rc<App>) {
+        let player = self.player.clone();
+        let weak_page = Rc::downgrade(self);
+        let volume = self.volume.clone();
+        let pending_seek = self.pending_seek.clone();
+        let last_user_change = self.last_user_change.clone();
+
+        // GLArea lifecycle: this page always renders with the handle it was
+        // wired to, so its mpv render context keeps its GL context.
         {
+            let p = player.clone();
             let a = app.clone();
             self.area.connect_realize(move |area| {
-                if !a.player.attach(area) {
+                if !p.attach(area) {
                     a.toast("Could not start video output (OpenGL)");
                 } else {
                     area.queue_render();
@@ -327,53 +342,55 @@ impl PlayerPage {
             });
         }
         {
-            let a = app.clone();
+            let p = player.clone();
             self.area.connect_render(move |area, _ctx| {
-                if !a.player.attach(area) {
+                if !p.attach(area) {
                     return glib::Propagation::Stop;
                 }
-                a.player.render(area);
+                p.render(area);
                 glib::Propagation::Proceed
             });
         }
         {
-            let a = app.clone();
-            self.area.connect_unrealize(move |_| {
-                a.player.detach();
-            });
+            let p = player.clone();
+            self.area.connect_unrealize(move |_| p.detach());
         }
+
+        // Clicking a mini tile promotes its stream into the full slot.
         {
+            let a = app.clone();
+            let weak = weak_page.clone();
             let click = gtk::GestureClick::new();
             click.set_button(1);
-            let a = app.clone();
             click.connect_pressed(move |_, _, _, _| {
-                if a.player_page.page.has_css_class("mini-player") {
-                    a.resume_player();
+                if let Some(page) = weak.upgrade() {
+                    a.activate_page(&page);
                 }
             });
-            // Capture phase ensures the mini-player activation is handled
-            // before the GLArea's play/pause gesture.
             click.set_propagation_phase(gtk::PropagationPhase::Capture);
             self.mini_click_area.add_controller(click);
         }
         // Click video: play/pause, double-click: fullscreen
         {
+            let a = app.clone();
+            let p = player.clone();
+            let weak = weak_page.clone();
             let click = gtk::GestureClick::new();
             click.set_button(1);
-            let a = app.clone();
             click.connect_pressed(move |_gesture, n_press, _x, _y| {
-                if a.stack.visible_child_name().as_deref() != Some("player") {
-                    a.resume_player();
+                let Some(page) = weak.upgrade() else {
                     return;
-                }
-                if a.player_page.page.has_css_class("mini-player") {
-                    a.resume_player();
+                };
+                if page.page.has_css_class("mini-player")
+                    || a.stack.visible_child_name().as_deref() != Some("player")
+                {
+                    a.activate_page(&page);
                     return;
                 }
                 if n_press == 2 {
                     a.toggle_fullscreen();
                 } else {
-                    a.player.toggle_pause();
+                    p.toggle_pause();
                     a.sync_pause_icon();
                     a.poke_controls();
                 }
@@ -382,9 +399,17 @@ impl PlayerPage {
         }
         // In live streams, adjust volume with vertical scroll over the video area.
         {
-            let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
             let a = app.clone();
+            let weak = weak_page.clone();
+            let volume = volume.clone();
+            let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
             scroll.connect_scroll(move |_, _dx, dy| {
+                if weak
+                    .upgrade()
+                    .is_some_and(|page| page.page.has_css_class("mini-player"))
+                {
+                    return glib::Propagation::Proceed;
+                }
                 let is_live = a
                     .current_media
                     .borrow()
@@ -394,8 +419,8 @@ impl PlayerPage {
                     return glib::Propagation::Proceed;
                 }
                 let step = if dy < 0.0 { 5.0 } else { -5.0 };
-                let value = (a.player_page.volume.value() + step).clamp(0.0, 100.0);
-                a.player_page.volume.set_value(value);
+                let value = (volume.value() + step).clamp(0.0, 100.0);
+                volume.set_value(value);
                 a.poke_controls();
                 glib::Propagation::Stop
             });
@@ -404,8 +429,8 @@ impl PlayerPage {
 
         // Mouse motion: show controls
         {
-            let motion = gtk::EventControllerMotion::new();
             let a = app.clone();
+            let motion = gtk::EventControllerMotion::new();
             motion.connect_motion(move |_, _, _| {
                 if a.stack.visible_child_name().as_deref() == Some("player") {
                     a.poke_controls();
@@ -426,9 +451,9 @@ impl PlayerPage {
             self.back.connect_clicked(move |_| a.go_back());
         }
         {
+            let a = app.clone();
             let click = gtk::GestureClick::new();
             click.set_button(1);
-            let a = app.clone();
             click.connect_pressed(move |_, _, _, _| a.start_live_catch_up());
             self.live_badge.add_controller(click);
         }
@@ -436,8 +461,9 @@ impl PlayerPage {
         // Bottom bar
         {
             let a = app.clone();
+            let p = player.clone();
             self.play.connect_clicked(move |_| {
-                a.player.toggle_pause();
+                p.toggle_pause();
                 a.sync_pause_icon();
                 a.poke_controls();
             });
@@ -446,18 +472,19 @@ impl PlayerPage {
             let a = app.clone();
             self.seek.connect_change_value(move |_scale, _scroll, value| {
                 if a.current_media.borrow().is_some() {
-                    a.player_page.pending_seek.set(Some(value));
-                    a.player_page.last_user_change.set(Some(Instant::now()));
+                    pending_seek.set(Some(value));
+                    last_user_change.set(Some(Instant::now()));
                 }
                 glib::Propagation::Proceed
             });
         }
         {
             let a = app.clone();
+            let p = player.clone();
             self.volume.connect_value_changed(move |scale| {
                 let v = scale.value();
-                a.player.set_volume(v);
-                a.player.set_mute(false);
+                p.set_volume(v);
+                p.set_mute(false);
                 {
                     let mut cfg = a.cfg.borrow_mut();
                     cfg.volume = v;
@@ -468,9 +495,21 @@ impl PlayerPage {
         }
         {
             let a = app.clone();
+            let p = player.clone();
+            let weak = weak_page.clone();
             self.vol_btn.connect_clicked(move |_| {
-                let muted = !a.player.is_muted();
-                a.player.set_mute(muted);
+                let muted = !p.is_muted();
+                p.set_mute(muted);
+                let en = a.is_english();
+                if let Some(page) = weak.upgrade() {
+                    page.vol_btn.set_tooltip_text(Some(if muted {
+                        if en { "Unmute (M)" } else { "Sesi aç (M)" }
+                    } else if en {
+                        "Mute / unmute (M)"
+                    } else {
+                        "Sesi aç / kapat (M)"
+                    }));
+                }
                 a.cfg.borrow_mut().muted = muted;
                 a.update_volume_icon();
                 a.poke_controls();
@@ -482,7 +521,12 @@ impl PlayerPage {
         }
         {
             let a = app.clone();
-            self.mini_close.connect_clicked(move |_| a.stop_player());
+            let weak = weak_page.clone();
+            self.mini_close.connect_clicked(move |_| {
+                if let Some(page) = weak.upgrade() {
+                    a.close_page(&page);
+                }
+            });
         }
 
         // Do not hide controls while the quality menu is open.
@@ -501,12 +545,13 @@ impl PlayerPage {
         // Silence skipping: the on/off state is stored in settings.
         {
             let initial = app.cfg.borrow().skip_silence;
-            app.player.set_skip_silence(initial);
+            player.set_skip_silence(initial);
             self.skip_silence.set_active(initial);
+            let p = player.clone();
             let a = app.clone();
             self.skip_silence.connect_toggled(move |button| {
                 let enabled = button.is_active();
-                a.player.set_skip_silence(enabled);
+                p.set_skip_silence(enabled);
                 a.cfg.borrow_mut().skip_silence = enabled;
                 let cfg = a.cfg.borrow().clone();
                 let _ = config::save(&cfg);
@@ -523,13 +568,13 @@ impl PlayerPage {
         // Initial volume settings
         {
             let cfg = app.cfg.borrow().clone();
-            app.player.set_volume(cfg.volume);
-            app.player.set_mute(cfg.muted);
+            player.set_volume(cfg.volume);
+            player.set_mute(cfg.muted);
             self.volume.set_value(cfg.volume);
             app.update_volume_icon();
         }
         self.set_controls_visible(true);
-        self.set_speed_options(&app);
+        self.set_speed_options(&player);
     }
 
     /// Shows/hides the controls (with a smooth transition).
@@ -571,7 +616,9 @@ impl PlayerPage {
         }
     }
 
-    pub fn set_media(&self, media: &Media) {
+    /// Updates the metadata shown in the player without starting a loading
+    /// state. Used when a running stream is swapped in from a mini player.
+    pub fn set_media_info(&self, media: &Media) {
         self.title.set_text(&media.title);
         self.subtitle.set_text(&media.subtitle);
         self.subtitle.set_visible(!media.subtitle.is_empty());
@@ -592,8 +639,12 @@ impl PlayerPage {
         self.pending_seek.set(None);
         self.quality_btn.set_label(if self.english.get() { "Quality" } else { "Kalite" });
         clear_container(&self.quality_box);
+    }
+
+    pub fn set_media(&self, media: &Media) {
+        self.set_media_info(media);
         self.spinner.start();
-        self.show_status(if live {
+        self.show_status(if media.kind == MediaKind::Live {
             if self.english.get() { "Connecting to live stream…" } else { "Canlı yayına bağlanılıyor…" }
         } else if self.english.get() { "Loading video…" } else { "Yayın yükleniyor…" });
     }
@@ -645,7 +696,7 @@ impl PlayerPage {
         }
     }
 
-    pub fn set_speed_options(&self, app: &Rc<App>) {
+    pub fn set_speed_options(&self, player: &mpv::SharedPlayer) {
         clear_container(&self.speed_box);
         for speed in [0.5, 0.75, 1.0, 1.25, 1.5, 2.0] {
             let label = if speed == 1.0 { "1x".to_string() } else { format!("{speed}x") };
@@ -653,12 +704,14 @@ impl PlayerPage {
             button.set_has_frame(false);
             button.set_halign(gtk::Align::Fill);
             button.add_css_class("flat");
-            let a = app.clone();
+            let p = player.clone();
             let selected = label.clone();
+            let speed_btn = self.speed_btn.clone();
+            let speed_popover = self.speed_popover.clone();
             button.connect_clicked(move |_| {
-                a.player.set_speed(speed);
-                a.player_page.speed_btn.set_label(&selected);
-                a.player_page.speed_popover.popdown();
+                p.set_speed(speed);
+                speed_btn.set_label(&selected);
+                speed_popover.popdown();
             });
             self.speed_box.append(&button);
         }

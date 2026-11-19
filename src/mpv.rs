@@ -12,6 +12,7 @@ use gtk::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::ffi::{c_char, c_double, c_int, c_void, CStr, CString};
 use std::ptr;
+use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -670,6 +671,128 @@ impl Player {
 impl Drop for Player {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+/// A repointable handle to a `Player`.
+///
+/// Each player page owns one handle for its whole lifetime, because its mpv
+/// render context is bound to that player and that page's `GLArea`. The app and
+/// the mini-player slots keep forked handles that can be repointed when a
+/// different page takes the full-screen slot. This lets two streams trade
+/// places without reloading either one or touching a render context.
+#[derive(Clone)]
+pub struct SharedPlayer {
+    inner: Rc<RefCell<Rc<Player>>>,
+}
+
+impl SharedPlayer {
+    pub fn new(player: Player) -> Self {
+        Self {
+            inner: Rc::new(RefCell::new(Rc::new(player))),
+        }
+    }
+
+    /// The `Player` currently held by this handle.
+    pub fn get(&self) -> Rc<Player> {
+        self.inner.borrow().clone()
+    }
+
+    fn set(&self, player: Rc<Player>) {
+        *self.inner.borrow_mut() = player;
+    }
+
+    /// Creates a separate handle pointing at the same player instance. Each
+    /// player page keeps one of these for its whole lifetime (its render
+    /// context is bound to that player); the app keeps a forked handle that it
+    /// can repoint when another page takes the full-screen slot.
+    pub fn fork(&self) -> Self {
+        Self {
+            inner: Rc::new(RefCell::new(self.get())),
+        }
+    }
+
+    /// Points this handle at the player held by `other` without changing
+    /// `other` (which may belong to a still-visible page).
+    pub fn repoint(&self, other: &Self) {
+        self.set(other.get());
+    }
+
+    // These forward to the current player so existing call sites stay unchanged.
+    pub fn attach(&self, area: &gtk::GLArea) -> bool {
+        self.get().attach(area)
+    }
+    pub fn detach(&self) {
+        self.get().detach();
+    }
+    pub fn render(&self, area: &gtk::GLArea) {
+        self.get().render(area);
+    }
+    pub fn load(&self, url: &str, start: Option<f64>) -> Result<()> {
+        self.get().load(url, start)
+    }
+    pub fn stop(&self) {
+        self.get().stop();
+    }
+    pub fn toggle_pause(&self) {
+        self.get().toggle_pause();
+    }
+    pub fn set_mute(&self, muted: bool) {
+        self.get().set_mute(muted);
+    }
+    pub fn set_volume(&self, volume: f64) {
+        self.get().set_volume(volume);
+    }
+    pub fn set_speed(&self, speed: f64) {
+        self.get().set_speed(speed);
+    }
+    pub fn position(&self) -> Option<f64> {
+        self.get().position()
+    }
+    pub fn duration(&self) -> Option<f64> {
+        self.get().duration()
+    }
+    pub fn cache_duration(&self) -> Option<f64> {
+        self.get().cache_duration()
+    }
+    pub fn is_paused(&self) -> bool {
+        self.get().is_paused()
+    }
+    pub fn is_muted(&self) -> bool {
+        self.get().is_muted()
+    }
+    pub fn is_idle(&self) -> bool {
+        self.get().is_idle()
+    }
+    pub fn video_height(&self) -> i64 {
+        self.get().video_height()
+    }
+    pub fn seek(&self, seconds: f64, exact: bool) {
+        self.get().seek(seconds, exact);
+    }
+    pub fn seek_relative(&self, seconds: f64) {
+        self.get().seek_relative(seconds);
+    }
+    pub fn audio_level_db(&self) -> Option<f64> {
+        self.get().audio_level_db()
+    }
+    pub fn set_skip_silence(&self, enabled: bool) {
+        self.get().set_skip_silence(enabled);
+    }
+    pub fn apply_silence_filter(&self, noise_db: i32, duration: f64) -> Result<()> {
+        self.get().apply_silence_filter(noise_db, duration)
+    }
+    pub fn set_silence_allowed(&self, allowed: bool) {
+        self.get().set_silence_allowed(allowed);
+    }
+    pub fn clear_silence(&self) {
+        self.get().clear_silence();
+    }
+    pub fn poll_events(&self) {
+        self.get().poll_events();
+    }
+    pub fn shutdown(&self) {
+        self.get().shutdown();
     }
 }
 
