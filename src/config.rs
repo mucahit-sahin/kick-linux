@@ -62,6 +62,9 @@ pub struct Config {
     /// Automatically skip silent parts in VODs.
     #[serde(default)]
     pub skip_silence: bool,
+    /// Derive the noise threshold from the audio instead of using a fixed value.
+    #[serde(default)]
+    pub auto_silence: bool,
     /// Audio level threshold (dB) below which audio counts as silence.
     #[serde(default = "default_silence_noise")]
     pub silence_noise_db: i32,
@@ -96,6 +99,7 @@ impl Default for Config {
             volume: default_volume(),
             muted: false,
             skip_silence: false,
+            auto_silence: false,
             silence_noise_db: default_silence_noise(),
             silence_duration: default_silence_duration(),
             resume_positions: HashMap::new(),

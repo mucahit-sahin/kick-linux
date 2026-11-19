@@ -89,6 +89,11 @@ pub struct App {
     pub language: RefCell<String>,
 
     pub cfg: RefCell<config::Config>,
+    /// Rolling RMS history used to derive the automatic silence threshold.
+    auto_levels: RefCell<Vec<f64>>,
+    /// Last threshold derived from the audio; `None` until enough samples exist.
+    auto_db: Cell<Option<i32>>,
+    last_auto_apply: Cell<Option<Instant>>,
     pub status: RefCell<HashMap<String, api::Channel>>,
     follow_views: RefCell<HashMap<String, SidebarRow>>,
 
@@ -371,6 +376,9 @@ impl App {
             player,
             language: RefCell::new(language),
             cfg: RefCell::new(cfg),
+            auto_levels: RefCell::new(Vec::new()),
+            auto_db: Cell::new(None),
+            last_auto_apply: Cell::new(None),
             status: RefCell::new(HashMap::new()),
             follow_views: RefCell::new(HashMap::new()),
             current_channel: RefCell::new(None),
@@ -456,6 +464,15 @@ impl App {
             ))
             .build();
 
+        let auto = adw::SwitchRow::builder()
+            .title(self.text("Otomatik eşik", "Automatic threshold"))
+            .subtitle(self.text(
+                "Ses düzeyini analiz ederek eşiği kendiliğinden belirler",
+                "Derives the threshold by analyzing the audio levels",
+            ))
+            .active(cfg.auto_silence)
+            .build();
+
         // AdwSpinRow varsayılan adjustment'ında step-increment 0 olduğundan
         // +/− düğmeleri çalışmaz. Adım ve sayfa artışını açıkça tanımlıyoruz.
         let noise_adjustment = gtk::Adjustment::new(
@@ -477,6 +494,15 @@ impl App {
         noise.set_digits(0);
         noise.set_climb_rate(1.0);
         noise.set_numeric(true);
+        noise.set_sensitive(!cfg.auto_silence);
+        {
+            let a = self.clone();
+            let noise = noise.clone();
+            auto.connect_active_notify(move |row| {
+                noise.set_sensitive(!row.is_active());
+                a.set_auto_silence(row.is_active());
+            });
+        }
 
         let duration_adjustment = gtk::Adjustment::new(
             cfg.silence_duration,
@@ -523,7 +549,7 @@ impl App {
                     if generation.get() == my_generation {
                         let cfg = a.cfg.borrow().clone();
                         if let Err(err) = a.player.apply_silence_filter(
-                            cfg.silence_noise_db,
+                            a.effective_silence_db(),
                             cfg.silence_duration,
                         ) {
                             eprintln!("Could not apply silence filter: {err}");
@@ -549,6 +575,7 @@ impl App {
         });
         reset.add_suffix(&reset_btn);
 
+        group.add(&auto);
         group.add(&noise);
         group.add(&duration);
         group.add(&reset);
@@ -580,9 +607,12 @@ impl App {
         level_label.set_xalign(0.0);
         let state_label = gtk::Label::new(None);
         state_label.add_css_class("dim-label");
+        let auto_label = gtk::Label::new(None);
+        auto_label.add_css_class("dim-label");
         now_row.append(&now_caption);
         now_row.append(&level_label);
         now_row.append(&state_label);
+        now_row.append(&auto_label);
         meter_box.append(&now_row);
 
         let samples = Rc::new(RefCell::new(vec![METER_MIN_DB; METER_SAMPLES]));
@@ -622,7 +652,7 @@ impl App {
                     let _ = cr.show_text(&format!("{db:.0}"));
                 }
 
-                let threshold = a.cfg.borrow().silence_noise_db as f64;
+                let threshold = a.effective_silence_db() as f64;
                 let ty = to_y(threshold);
 
                 // Region below the threshold is treated as silence.
@@ -678,6 +708,7 @@ impl App {
             let history = samples.clone();
             let level_label = level_label.clone();
             let state_label = state_label.clone();
+            let auto_label = auto_label.clone();
             let meter = meter.clone();
             let id = glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
                 let db = a.player.audio_level_db();
@@ -686,7 +717,8 @@ impl App {
                     history.pop();
                     history.insert(0, db.unwrap_or(f64::NEG_INFINITY));
                 }
-                let silent = db.is_some_and(|v| v < a.cfg.borrow().silence_noise_db as f64);
+                let effective = a.effective_silence_db();
+                let silent = db.is_some_and(|v| v < effective as f64);
                 level_label.set_text(&match db {
                     Some(v) if v.is_finite() => format!("{v:.1} dB"),
                     Some(_) => "-∞ dB".to_string(),
@@ -697,6 +729,17 @@ impl App {
                 } else {
                     ""
                 });
+                let auto_text = if a.cfg.borrow().auto_silence {
+                    match a.auto_db.get() {
+                        Some(db) => format!("· otomatik: {db} dB"),
+                        None => a
+                            .text("· otomatik: analiz ediliyor…", "· auto: analyzing…")
+                            .to_string(),
+                    }
+                } else {
+                    String::new()
+                };
+                auto_label.set_text(&auto_text);
                 meter.queue_draw();
                 glib::ControlFlow::Continue
             });
@@ -1690,6 +1733,7 @@ impl App {
 
     pub fn stop_player(&self) {
         self.save_current_position();
+        self.reset_auto_silence();
         self.player.set_silence_allowed(false);
         self.player.stop();
         self.resume_pending.set(None);
@@ -1932,6 +1976,101 @@ impl App {
         self.toast_overlay.add_toast(toast);
     }
 
+    // ---- automatic silence threshold ----
+
+    /// Threshold actually in use: either the value derived from the audio or
+    /// the manually configured one.
+    pub fn effective_silence_db(&self) -> i32 {
+        let cfg = self.cfg.borrow();
+        if cfg.auto_silence {
+            self.auto_db.get().unwrap_or(cfg.silence_noise_db)
+        } else {
+            cfg.silence_noise_db
+        }
+    }
+
+    /// Drops the analysis window; called when the media or the mode changes.
+    fn reset_auto_silence(&self) {
+        self.auto_levels.borrow_mut().clear();
+        self.auto_db.set(None);
+        self.last_auto_apply.set(None);
+    }
+
+    /// Turns automatic detection on/off and applies the resulting threshold
+    /// to the mpv filter chain immediately.
+    fn set_auto_silence(self: &Rc<Self>, enabled: bool) {
+        {
+            let mut cfg = self.cfg.borrow_mut();
+            if cfg.auto_silence == enabled {
+                return;
+            }
+            cfg.auto_silence = enabled;
+        }
+        self.reset_auto_silence();
+        let cfg = self.cfg.borrow().clone();
+        if let Err(err) = self.player.apply_silence_filter(
+            self.effective_silence_db(),
+            cfg.silence_duration,
+        ) {
+            eprintln!("Could not apply silence threshold: {err}");
+        }
+        let _ = config::save(&cfg);
+    }
+
+    /// Collects one RMS sample per tick and periodically re-derives the noise
+    /// threshold from the level distribution: the quiet floor (10th percentile)
+    /// and the loud parts (85th percentile). The gate is placed between them so
+    /// it adapts both to quiet recordings and to noisy ones. A fairly uniform
+    /// level means there is no silence to separate, so nothing is changed.
+    fn sample_auto_silence(&self) {
+        if !self.cfg.borrow().auto_silence {
+            return;
+        }
+        if self.stack.visible_child_name().as_deref() != Some("player") {
+            return;
+        }
+        if self
+            .current_media
+            .borrow()
+            .as_ref()
+            .is_some_and(|m| m.kind != MediaKind::Vod)
+        {
+            return;
+        }
+        let Some(level) = self.player.audio_level_db() else {
+            return;
+        };
+        {
+            let mut levels = self.auto_levels.borrow_mut();
+            // Digital silence is a valid sample; pin it to the meter floor.
+            levels.push(if level.is_finite() { level } else { -80.0 });
+            if levels.len() > 400 {
+                levels.remove(0);
+            }
+        }
+        if self
+            .last_auto_apply
+            .get()
+            .is_some_and(|t| t.elapsed().as_secs_f64() < 4.0)
+        {
+            return;
+        }
+        let levels = self.auto_levels.borrow();
+        let Some(detected) = auto_threshold(&levels) else {
+            return;
+        };
+        if self.auto_db.get() == Some(detected) {
+            return;
+        }
+        drop(levels);
+        self.auto_db.set(Some(detected));
+        self.last_auto_apply.set(Some(Instant::now()));
+        let duration = self.cfg.borrow().silence_duration;
+        if let Err(err) = self.player.apply_silence_filter(detected, duration) {
+            eprintln!("Could not apply automatic silence threshold: {err}");
+        }
+    }
+
     // ---- player loop ----
 
     fn tick(self: &Rc<Self>) {
@@ -1939,6 +2078,7 @@ impl App {
         // the mini player is active). Since silence skipping is implemented as a
         // speed change, it is triggered here.
         self.player.poll_events();
+        self.sample_auto_silence();
 
         if self.stack.visible_child_name().as_deref() != Some("player") {
             return;
@@ -2090,6 +2230,29 @@ impl App {
     }
 }
 
+/// Places the noise gate between the quiet floor and the loud parts of the
+/// observed RMS levels. Returns `None` until there are enough samples or when
+/// the level is too uniform to tell silence from speech.
+fn auto_threshold(levels: &[f64]) -> Option<i32> {
+    if levels.len() < 20 {
+        return None;
+    }
+    let mut sorted = levels.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let percentile = |q: f64| sorted[((sorted.len() - 1) as f64 * q).round() as usize];
+    let quiet = percentile(0.10);
+    let loud = percentile(0.85);
+    let spread = loud - quiet;
+    if spread < 8.0 {
+        return None;
+    }
+    Some(
+        ((loud - 18.0).min(quiet + 0.5 * spread))
+            .clamp(-70.0, -20.0)
+            .round() as i32,
+    )
+}
+
 fn setup_actions(gtk_app: &adw::Application, app: &Rc<App>) {
     const PROJECT_URL: &str = "https://github.com/mucahit-sahin/kick-linux";
     const AUTHOR_URL: &str = "https://github.com/mucahit-sahin";
@@ -2211,4 +2374,44 @@ pub fn vod_subtitle(vod: &api::Vod) -> String {
         parts.push(format!("{} views", fmt::human_count(vod.view_count())));
     }
     parts.join(" · ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::auto_threshold;
+
+    #[test]
+    fn needs_enough_audio_samples() {
+        assert_eq!(auto_threshold(&vec![-80.0; 19]), None);
+    }
+
+    #[test]
+    fn ignores_uniform_audio() {
+        let levels = vec![-30.0; 100];
+        assert_eq!(auto_threshold(&levels), None);
+    }
+
+    #[test]
+    fn places_gate_between_digital_silence_and_speech() {
+        // Half the frames are silent, the rest peak near -43 dB (measured from
+        // a real tone through mpv's astats filter).
+        let mut levels = vec![-80.0; 50];
+        levels.extend(vec![-43.0; 50]);
+        assert_eq!(auto_threshold(&levels), Some(-62));
+    }
+
+    #[test]
+    fn adapts_to_a_noisy_room() {
+        let mut levels = vec![-60.0; 50];
+        levels.extend(vec![-25.0; 50]);
+        assert_eq!(auto_threshold(&levels), Some(-43));
+    }
+
+    #[test]
+    fn stays_within_the_allowed_range() {
+        let mut levels = vec![-90.0; 50];
+        levels.extend(vec![0.0; 50]);
+        let db = auto_threshold(&levels).unwrap();
+        assert!((-70..=-20).contains(&db));
+    }
 }
