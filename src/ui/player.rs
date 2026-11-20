@@ -48,8 +48,11 @@ pub struct PlayerPage {
     pub spinner: gtk::Spinner,
     pub status_label: gtk::Label,
     /// Pending target when the user changes the progress bar, before it is sent to mpv.
-    pub pending_seek: Cell<Option<f64>>,
-    pub last_user_change: Cell<Option<Instant>>,
+    /// These are `Rc<Cell<_>>` so the `change_value` callback and the player tick
+    /// share the same cell. A plain `Cell<T>: Clone` copies its contents instead
+    /// of sharing them, which silently dropped every user seek.
+    pub pending_seek: Rc<Cell<Option<f64>>>,
+    pub last_user_change: Rc<Cell<Option<Instant>>>,
     /// Generation counter for delayed control hiding. A timeout is ignored if
     /// another one (or a page swap) has advanced the counter since it was set.
     /// Unlike removing a `SourceId`, this can never fail or panic.
@@ -313,8 +316,8 @@ impl PlayerPage {
             center,
             spinner,
             status_label,
-            pending_seek: Cell::new(None),
-            last_user_change: Cell::new(None),
+            pending_seek: Rc::new(Cell::new(None)),
+            last_user_change: Rc::new(Cell::new(None)),
             hide_generation: Cell::new(0),
             controls_visible: Cell::new(true),
             paused_icon: Cell::new(false),
